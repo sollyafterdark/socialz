@@ -27,10 +27,17 @@
 --   Rule 2: no SUPERADMIN, has an ADMIN          -> earliest-created ADMIN
 --                                                    (by UserOrganization
 --                                                    .createdAt) promoted
---                                                    to OWNER.
+--                                                    to OWNER, preferring a
+--                                                    non-disabled / non-
+--                                                    deleted / activated
+--                                                    candidate over a
+--                                                    disabled one when both
+--                                                    exist (see below).
 --   Rule 3: no SUPERADMIN, no ADMIN, has members -> earliest-created
 --                                                    member (any role)
---                                                    promoted to OWNER.
+--                                                    promoted to OWNER,
+--                                                    same health preference
+--                                                    as Rule 2.
 --   Rule 4: zero members                         -> cannot be
 --                                                    auto-resolved; not
 --                                                    handled here, left
@@ -60,6 +67,20 @@ LOCK TABLE "UserOrganization" IN ACCESS EXCLUSIVE MODE;
 -- removes those values. Rule 1 needs no computation -- it falls out of
 -- the mechanical SUPERADMIN -> OWNER mapping below. Rule 4 (zero members)
 -- has no row to promote.
+--
+-- DEVIATION FLAGGED, NOT SILENT: ADR-0001's rules 2/3 say "earliest-created
+-- ADMIN" / "earliest-created member" without qualifying on account health.
+-- Read literally, that can promote a disabled UserOrganization row or a
+-- deactivated/soft-deleted User to OWNER, satisfying the letter of "every
+-- workspace has an OWNER" while leaving that workspace with an OWNER who
+-- cannot actually log in or act. This migration instead prefers the
+-- earliest-created HEALTHY candidate (not disabled, User.deletedAt IS
+-- NULL, User.activated) and only falls through to an unhealthy one if no
+-- healthy candidate exists in that workspace -- still never leaving a
+-- non-empty workspace ownerless, just picking a usable owner when one is
+-- available. This refinement needs the same owner/PM sign-off as the rest
+-- of this migration, called out explicitly rather than shipped as an
+-- unstated implementation detail.
 CREATE TEMP TABLE "_db01_fallback_promotions" ON COMMIT DROP AS
 WITH orgs_with_superadmin AS (
   SELECT DISTINCT "organizationId"
@@ -72,24 +93,36 @@ orgs_with_admin AS (
   WHERE role = 'ADMIN'
 ),
 rule2_ranked AS (
-  SELECT id, "organizationId",
+  SELECT uo.id, uo."organizationId",
          row_number() OVER (
-           PARTITION BY "organizationId"
-           ORDER BY "createdAt" ASC, id ASC
+           PARTITION BY uo."organizationId"
+           ORDER BY
+             -- healthy (not disabled, not soft-deleted, activated) candidates
+             -- first; only fall through to an unhealthy one if no healthy
+             -- candidate exists in this workspace, so the auto-promoted
+             -- OWNER can actually use the account whenever that's possible.
+             (uo.disabled OR u."deletedAt" IS NOT NULL OR NOT u.activated) ASC,
+             uo."createdAt" ASC,
+             uo.id ASC
          ) AS rn
-  FROM "UserOrganization"
-  WHERE role = 'ADMIN'
-    AND "organizationId" NOT IN (SELECT "organizationId" FROM orgs_with_superadmin)
+  FROM "UserOrganization" uo
+  JOIN "User" u ON u.id = uo."userId"
+  WHERE uo.role = 'ADMIN'
+    AND uo."organizationId" NOT IN (SELECT "organizationId" FROM orgs_with_superadmin)
 ),
 rule3_ranked AS (
-  SELECT id, "organizationId",
+  SELECT uo.id, uo."organizationId",
          row_number() OVER (
-           PARTITION BY "organizationId"
-           ORDER BY "createdAt" ASC, id ASC
+           PARTITION BY uo."organizationId"
+           ORDER BY
+             (uo.disabled OR u."deletedAt" IS NOT NULL OR NOT u.activated) ASC,
+             uo."createdAt" ASC,
+             uo.id ASC
          ) AS rn
-  FROM "UserOrganization"
-  WHERE "organizationId" NOT IN (SELECT "organizationId" FROM orgs_with_superadmin)
-    AND "organizationId" NOT IN (SELECT "organizationId" FROM orgs_with_admin)
+  FROM "UserOrganization" uo
+  JOIN "User" u ON u.id = uo."userId"
+  WHERE uo."organizationId" NOT IN (SELECT "organizationId" FROM orgs_with_superadmin)
+    AND uo."organizationId" NOT IN (SELECT "organizationId" FROM orgs_with_admin)
 )
 SELECT id, 2 AS fallback_rule FROM rule2_ranked WHERE rn = 1
 UNION ALL

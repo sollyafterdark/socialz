@@ -157,9 +157,22 @@ one `OWNER` per non-empty workspace, left the zero-member workspace
 untouched, and left every other role's mapping exact (`ADMIN`→`ADMIN` for
 non-promoted admins, `USER`→`EDITOR` for non-promoted members). Re-run
 against a second fresh disposable container after adding the explicit
-`LOCK TABLE` statement (see below) — same fixture, identical results. Both
-disposable containers were removed after validation; `socialz-postgres`
-was only ever touched by the read-only report queries below.
+`LOCK TABLE` statement (see below) — same fixture, identical results.
+
+Re-run a third time on a third fresh disposable container, fixture
+extended with two health-preference cases (from ultrareview's fallback-
+selection finding, addressed below): a workspace whose earliest ADMIN is
+`disabled` (correctly skipped in favor of the later, healthy ADMIN), and
+a workspace where every ADMIN candidate is unhealthy — one soft-deleted,
+one deactivated (correctly still promotes the earliest of the two rather
+than leaving the workspace ownerless, exactly matching Rule 2's "cannot
+be auto-resolved" carve-out being reserved for Rule 4 alone). The report
+script's predicted `auto_promoted_user_id`/`auto_promoted_is_healthy` per
+workspace matched the migration's actual output exactly in every case.
+
+All three disposable containers were removed after validation;
+`socialz-postgres` was only ever touched by the read-only report queries
+below.
 
 `migration.sql` also takes an explicit `LOCK TABLE "UserOrganization" IN
 ACCESS EXCLUSIVE MODE` immediately after `BEGIN`, before Step 1 reads the
@@ -170,22 +183,104 @@ another transaction could otherwise insert or update a row — making the
 fallback computation and the migrated data agree by explicit construction
 rather than by incidental statement ordering.
 
-## Code that will not compile once this schema change is deployed
+## ⚠️ Deploy path bypasses `migration.sql` entirely — found by ultrareview, verified
+
+**Found by `/code-review ultra`, confirmed by direct inspection of the live
+`socialz-app` container.** The running container's entrypoint (`docker
+inspect socialz-app`) exports `DATABASE_URL` from secrets and then runs
+`exec sh -c 'nginx && pnpm run pm2'`, which resolves through
+`Dockerfile.dev`'s `CMD` and root `package.json` to:
+
+```
+pm2-run: pm2 delete all || true && pnpm run prisma-db-push && pnpm run --parallel pm2 && pm2 logs
+prisma-db-push: pnpm dlx prisma@6.5.0 db push --accept-data-loss --schema ./libraries/.../schema.prisma
+```
+
+**This runs on every container start** (deploy, crash restart, host
+reboot) — not just the first one. `db push` reconciles the live database
+directly to whichever `schema.prisma` is in the image; it has no concept
+of `migrations/` and will not run `migration.sql`'s CASE-based remap or
+fallback-owner logic. Its generated `ALTER COLUMN ... TYPE ... USING
+(role::text::"Role_new")` has no mapping for `SUPERADMIN`/`USER`, so on a
+database that still has any row in those values, the cast raises `invalid
+input value for enum` and the whole `&&` chain aborts before
+`pnpm run --parallel pm2` ever runs — the app processes never start.
+Postgres aborts the failed statement's transaction atomically, so this
+fails as a hard outage (container won't come up) rather than as silent
+data corruption — but it is still a self-inflicted outage this PR must
+not walk into blind.
+
+**This means merging this PR's `schema.prisma` change is not enough by
+itself, and the ordering matters:** `migration.sql` (via the baselined
+`prisma migrate deploy` above, or a manual `psql` apply after backup)
+**must be applied before the next `socialz-app` container restart of any
+kind** — not just before some notional "cutover" — because that restart
+will run `db push --accept-data-loss` regardless of whether anyone
+intended a deploy that day. If `migration.sql` has already been applied
+by the time `db push` runs, the live schema already matches
+`schema.prisma` and `db push` is a no-op for the `Role` enum; nothing
+extra happens. On the current, empty `socialz-postgres` (0
+`UserOrganization` rows) this specific crash can't fire today — there's
+no `SUPERADMIN`/`USER` value for the cast to fail on — but that stops
+being true the moment real workspaces exist, and this hazard needs a real
+fix before then. **Out of DB-01's scope** (`Dockerfile.dev` and
+`package.json`'s deploy scripts belong to the devops stream), flagged
+here as a hard blocker for the actual cutover, not something this PR can
+resolve by itself. Recommend devops add a migration-status check (or gate
+`prisma-db-push` behind `prisma migrate status`) before RBAC-04's cutover
+window, not merely reorder the manual steps by hand.
+
+## Code that will not compile — and code that will silently misbehave
 
 This PR intentionally does not touch application code — that repoint is
 RBAC-04's scope (`docs/backlog/2026-09-admin-rbac-v1.md`), which already
-has a line-by-line table of every call site. For the record, these 6
-references to the retired `Role.SUPERADMIN` / `Role.USER` values will stop
-compiling the moment this schema change is actually deployed, matching
-RBAC-04's table exactly:
+has a line-by-line table of every call site. Two distinct categories,
+both found by direct inspection (the second sharpened by `/code-review
+ultra`):
+
+**Will fail to compile** the moment this schema lands on `main` — root
+`package.json`'s `"postinstall": "pnpm run prisma-generate"` means every
+`pnpm install` (including CI's `build.yml`, not just an actual database
+deploy) regenerates `@prisma/client` against the new enum. These 6
+references to the retired `Role.SUPERADMIN` / `Role.USER` enum members
+stop compiling at that point, matching RBAC-04's table exactly:
 
 - `organizations/organization.repository.ts:36,366,495`
 - `users/users.repository.ts:143`
 - `users/users.service.ts:90,111`
 
-Sequencing (DB-01 merges, then RBAC-04 repoints) is the backlog's existing
-plan, not something this PR changes — flagged here so it isn't a surprise
-at cutover time.
+**Will silently misbehave, with no compile signal at all** — code that
+compares `role` against a string literal typed as a plain string union
+rather than importing the `Role` enum, so it keeps compiling fine while
+quietly doing the wrong thing once the migration runs:
+
+- `apps/backend/src/services/auth/permissions/permissions.service.ts:42,131`
+  — `['ADMIN', 'SUPERADMIN'].includes(permission)`. Already in RBAC-04's
+  repoint table (row 5) as `['ADMIN', 'OWNER']` — covered, not a gap.
+- `libraries/.../organizations/organization.service.ts:175-176`
+  (`deleteTeamMember`) — **found by `/code-review ultra`, not in RBAC-04's
+  existing 19-reference table, and genuinely security-relevant:**
+  ```
+  const myLevel = myRole === 'USER' ? 0 : myRole === 'ADMIN' ? 1 : 2;
+  const userLevel = userRole === 'USER' ? 0 : userRole === 'ADMIN' ? 1 : 2;
+  if (myLevel < userLevel) { throw ... }
+  ```
+  Today only `SUPERADMIN` falls into the `: 2` branch, so this correctly
+  stops a lower-role user from removing a higher one. After this
+  migration, `OWNER`, `EDITOR`, `CONTRIBUTOR`, `TRANSLATOR`, and `VIEWER`
+  *all* fall into that same `: 2` branch (none of them literally equal
+  `'USER'` or `'ADMIN'`), so they all become equally "level 2" — a
+  `VIEWER` (`myLevel` 2) could remove an `OWNER` (`userLevel` 2), since
+  `2 < 2` is false and the guard never fires. **This is a privilege-
+  escalation gap RBAC-04's own repoint table missed and must add before
+  that ticket is implemented** — flagging it here rather than fixing it
+  myself, since `organization.service.ts` is auth-rbac-owned, security-
+  sensitive code, not database's to edit.
+
+Sequencing (DB-01 merges, then RBAC-04 repoints, informed by the gap just
+found) is the backlog's existing plan, not something this PR changes —
+flagged here, and in the merge-instruction section of the PR description,
+so none of this is a surprise at cutover time.
 
 ## Pre-migration report
 

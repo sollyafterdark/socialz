@@ -20,6 +20,16 @@
 -- cases (rules 2-4) surface first -- rule 1 (mechanical SUPERADMIN ->
 -- OWNER, nothing to review) sorts last.
 --
+-- Rules 2/3 match migration.sql's actual selection exactly: among
+-- candidates, a non-disabled / non-soft-deleted / activated ("healthy")
+-- row is preferred over an unhealthy one, tie-broken by earliest
+-- UserOrganization.createdAt; only if no healthy candidate exists in that
+-- workspace does an unhealthy one get promoted. `auto_promoted_is_healthy`
+-- below flags exactly that case, since a disabled/deactivated OWNER
+-- satisfies the "workspace has an OWNER" invariant on paper but can't
+-- actually log in -- worth the owner's attention even though it's not a
+-- different rule.
+--
 -- Query 2 lists every row currently SUPERADMIN, so the owner can decide
 -- by hand which of those users should *additionally* get
 -- User.isSuperAdmin = true (Platform Admin). That decision is manual —
@@ -34,8 +44,10 @@ WITH org_roles AS (
     uo."userId",
     uo.role::text AS role,
     uo."createdAt",
+    uo.disabled,
     u.email,
-    u.name
+    u.name,
+    (NOT uo.disabled AND u."deletedAt" IS NULL AND u.activated) AS is_healthy
   FROM "UserOrganization" uo
   JOIN "User" u ON u.id = uo."userId"
 ),
@@ -52,16 +64,16 @@ member_counts AS (
 ),
 earliest_admin AS (
   SELECT DISTINCT ON ("organizationId")
-    "organizationId", "userId", email, name, "createdAt"
+    "organizationId", "userId", email, name, "createdAt", is_healthy
   FROM org_roles
   WHERE role = 'ADMIN'
-  ORDER BY "organizationId", "createdAt" ASC, id ASC
+  ORDER BY "organizationId", is_healthy DESC, "createdAt" ASC, id ASC
 ),
 earliest_member AS (
   SELECT DISTINCT ON ("organizationId")
-    "organizationId", "userId", email, name, "createdAt"
+    "organizationId", "userId", email, name, "createdAt", is_healthy
   FROM org_roles
-  ORDER BY "organizationId", "createdAt" ASC, id ASC
+  ORDER BY "organizationId", is_healthy DESC, "createdAt" ASC, id ASC
 )
 SELECT
   mc."organizationId",
@@ -91,12 +103,21 @@ SELECT
     WHEN mc.member_count > 0 THEN em.name
   END AS auto_promoted_name,
   CASE
+    WHEN mc.superadmin_count > 0 THEN NULL
+    WHEN mc.admin_count > 0 THEN ea.is_healthy
+    WHEN mc.member_count > 0 THEN em.is_healthy
+  END AS auto_promoted_is_healthy,
+  CASE
     WHEN mc.superadmin_count > 0 THEN
       'Rule 1: has SUPERADMIN row(s) -> map to OWNER mechanically, no auto-promotion decision needed'
-    WHEN mc.admin_count > 0 THEN
+    WHEN mc.admin_count > 0 AND ea.is_healthy THEN
       'Rule 2: no SUPERADMIN; earliest-created ADMIN (by UserOrganization.createdAt) auto-promoted to OWNER'
-    WHEN mc.member_count > 0 THEN
+    WHEN mc.admin_count > 0 THEN
+      'Rule 2: no SUPERADMIN; no healthy ADMIN candidate -- earliest-created ADMIN auto-promoted to OWNER despite being disabled/deactivated/deleted, review before cutover'
+    WHEN mc.member_count > 0 AND em.is_healthy THEN
       'Rule 3: no SUPERADMIN or ADMIN; earliest-created member of any role auto-promoted to OWNER'
+    WHEN mc.member_count > 0 THEN
+      'Rule 3: no SUPERADMIN or ADMIN; no healthy member candidate -- earliest-created member auto-promoted to OWNER despite being disabled/deactivated/deleted, review before cutover'
     ELSE
       'Rule 4: zero members -- cannot auto-resolve, flag for manual review'
   END AS reason
