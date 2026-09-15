@@ -37,6 +37,57 @@ brief's "verify before ticketing as new work" instruction:
 
 ---
 
+## DevOps tickets (deploy safety — read this before DB-01)
+
+Both found during `/code-review ultra` on PR #4 (DB-01). Both block DB-01
+being merged/deployed, not the other way around — see each ticket and
+ADR-0004.
+
+### DEVOPS-01 — Baseline migrations, replace boot-time `db push` with `migrate deploy`
+Implements ADR-0004. This repo has never had a `migrations/` directory —
+boot has only ever run `prisma db push --accept-data-loss`, which
+reconciles the live DB straight to `schema.prisma` with no data remap.
+DB-01's `migration.sql` is the first real migration this project has
+needed, and `db push` doesn't read `migrations/` at all — left as-is, the
+next image rebuild+redeploy containing DB-01's schema change crash-loops
+the container the moment it hits a row still holding `SUPERADMIN`/`USER`
+(removed from the enum), because `--accept-data-loss` doesn't rescue an
+enum-cast failure.
+- Baseline the **current, pre-DB-01** schema as an initial migration;
+  mark it applied against every real environment via `prisma migrate
+  resolve --applied <name>` without running its SQL (standard procedure
+  for adopting migrations against an existing populated database).
+- Replace `pm2-run`'s `prisma-db-push` step with `prisma migrate deploy`.
+- This is a one-time, environment-specific operation — include a runbook
+  step for baselining production's actual current state, not just a code
+  change.
+**Depends on:** PR #1 (devops' isolated-stack compose) merging first —
+this ticket implements against whatever image/compose PR #1 lands with,
+not the current `Dockerfile.dev`, which PR #1 may replace outright.
+**Blocks:** DB-01 (must not merge/deploy DB-01's migration until boot can
+actually run it via `migrate deploy` instead of bypassing it via
+`db push`).
+
+### DEVOPS-02 — Dedicated, pinned production deploy checkout
+Production must run from a dedicated checkout pinned to `main` (e.g.
+`/srv/socialz-deploy`), with `name: socialz` explicit in the compose file
+— never from a development working directory that gets `git checkout`ed
+between branches. **Incident, not hypothetical:** the live stack's config
+path currently holds upstream's compose file because a feature branch was
+checked out there — i.e. production has already been accidentally pointed
+at the wrong compose config once, from exactly this class of mistake.
+Scope: establish the dedicated deploy path, pin it to `main`, add the
+explicit `name: socialz` (belt-and-suspenders alongside
+`COMPOSE_PROJECT_NAME=socialz` from CHARTER.md — an explicit `name:` in
+the compose file itself doesn't depend on an env var being set correctly
+in whatever shell runs `docker compose`), and document the operational
+rule (deploys happen via CI/CD pulling into that fixed path, per
+CHARTER.md §4 — never via a human `cd`-ing into a dev checkout and running
+compose commands by hand).
+**Depends on:** PR #1 (defines the compose file this pins).
+
+---
+
 ## Database tickets
 
 ### DB-01 — Migrate `Role` enum to the six-role workspace model
@@ -66,6 +117,10 @@ just the rule-1 cases. Also still needed, as before: rows currently
 additionally get `User.isSuperAdmin = true` (Platform Admin) — that
 decision stays manual, ADR-0001 does not automate it. Include a rollback
 plan.
+**Blocked on:** DEVOPS-01 (per ADR-0004 — do not merge/deploy this
+migration until boot runs `prisma migrate deploy` instead of `db push`;
+merging DB-01 first reintroduces the crash-loop hazard DEVOPS-01 exists to
+prevent).
 **Blocks:** RBAC-01 through RBAC-08.
 
 ### DB-02 — Contributor approval state on `Post`
@@ -209,7 +264,8 @@ value:
 | 16 | `organization.selector.tsx:82,94` | Org-switcher dropdown display label | `role === 'OWNER'`, label "Owner" |
 | 17 | `user.context.tsx:15,28` | Frontend `User`/role TS type definitions | Full six-role union |
 | 18 | `top.menu.tsx:191,250,273,303` | Nav-item visibility (media agent, affiliate link, billing, settings) per role array | Replace `'SUPERADMIN'` with `'OWNER'` in each array — **and revisit whether `EDITOR`/`CONTRIBUTOR`/`TRANSLATOR`/`VIEWER` should also see each item; don't just find-and-replace the string.** Cross-check against UI-01/UI-02. |
-| 19 | `teams.component.tsx:115,122` | Team-management "can I act on this member" level comparison, currently a 3-level scale (`USER`<`ADMIN`<`SUPERADMIN`) | Needs a real 6-level hierarchy, not a rename — this is UI-02's scope already; flag the coupling here so it isn't built twice |
+| 19 | `teams.component.tsx:113,115-116,122,183` | Team-management "can I act on this member" level comparison (`myLevel`/`getLevel`, :113/:115-116), the type it's typed against (:122), and a role display-label fallback (:183: `p.role === 'USER' ? … : p.role === 'ADMIN' ? … : t('super_admin', 'Super Admin')`) — all a 3-bucket scale (`USER`<`ADMIN`<everything else) | Needs a real 6-level hierarchy, not a rename — this is UI-02's scope already; flag the coupling here so it isn't built twice. Same defect as #20 below (identical bug shape to `organization.service.ts:175-176` — build one canonical hierarchy, don't duplicate it frontend/backend). :183 is a display bug specifically: post-migration it would label `OWNER`, `EDITOR`, `CONTRIBUTOR`, `TRANSLATOR`, and `VIEWER` all as "Super Admin." (Corrected from the prior pass, which cited only :115,122 and missed the actual buggy :113 line and the :183 display bug — found by the full `SUPERADMIN\|USER` sweep, 2026-09-15.) |
+| 20 | `organization.service.ts:175-176` (`deleteTeamMember`) | The backend's own "can I remove this member" level-gate: `myLevel = myRole === 'USER' ? 0 : myRole === 'ADMIN' ? 1 : 2` (same shape for `userLevel`); only throws if `myLevel < userLevel` | **Real bug — found by `/code-review ultra` on PR #4, not a rename.** Post-migration, `OWNER`, `EDITOR`, `CONTRIBUTOR`, `TRANSLATOR`, and `VIEWER` all fall into the `: 2` branch together (none of them literally equals `'USER'` or `'ADMIN'`), so the guard never fires between any two of those five — concretely, a `VIEWER` could remove an `OWNER` from the workspace. Needs a full 6-value map, not a 3-branch ternary. **Correct ordering:** `OWNER=5, ADMIN=4, EDITOR=3, CONTRIBUTOR=2, TRANSLATOR=1, VIEWER=0` — matches the order the roles were given in the owner's original consolidated decision, and as a strict total order (no two roles share a level) it makes `myLevel < userLevel` alone sufficient to block a lower role from acting on a higher one, `OWNER` included (`ADMIN`'s 4 `< OWNER`'s 5 already throws — no separate special-case guard needed). Same defect, same fix, exists in `teams.component.tsx` (#19) — build one canonical role-hierarchy constant/helper and have both call it, rather than two independently-maintained copies of the same ranking drifting apart. |
 
 **Resolution on #1/#2 (owner decision, 2026-09-15): fix the access-control
 gap for real, don't preserve it.** `PublicAuthMiddleware` currently fakes
@@ -270,6 +326,22 @@ itself an admin action worth recording).
 obvious constraint that only an `OWNER` can grant `OWNER`. This extends the
 existing, already-working invite flow (see "verified adopt-as-is" above) —
 do not rebuild invite-by-email itself.
+
+**Additional sites found by the full `SUPERADMIN|USER` string-literal
+sweep (2026-09-15, run for RBAC-04) that this ticket's original scope
+missed** — same "only USER/ADMIN" limitation, not previously named here:
+- `auth.service.ts:40` (`routeAuth`'s `addToOrg` param type) and `:128`
+  (`getOrgFromCookie`'s decoded-JWT return type) — the invite-*acceptance*
+  side of the same flow (decoding the signed invite link), not just the
+  DTOs on the invite-*sending* side.
+- `organization.repository.ts:302` and `organization.service.ts:45,152`
+  (`addUserToOrg`'s role param, `addTeamMemberByEmail`'s `body.role as`
+  cast) — the repository/service layer the DTOs above ultimately call
+  into.
+- `teams.component.tsx:24` (`roles` array feeding the invite form's
+  `<Select>`) and `impersonate.tsx:769` (a second, separate "add team
+  member" form with its own hardcoded `<option value="USER">`/`"ADMIN"`
+  pair) — two independent frontend role-pickers, not one.
 **Depends on:** DB-01.
 
 ---
