@@ -78,9 +78,9 @@ LOCK TABLE "UserOrganization" IN ACCESS EXCLUSIVE MODE;
 -- NULL, User.activated) and only falls through to an unhealthy one if no
 -- healthy candidate exists in that workspace -- still never leaving a
 -- non-empty workspace ownerless, just picking a usable owner when one is
--- available. This refinement needs the same owner/PM sign-off as the rest
--- of this migration, called out explicitly rather than shipped as an
--- unstated implementation detail.
+-- available. APPROVED: project owner, relayed by PM, 2026-09-15 (PR #4
+-- review thread) -- this refinement is accepted as part of DB-01's
+-- fallback logic, not deferred to a follow-up ticket.
 CREATE TEMP TABLE "_db01_fallback_promotions" ON COMMIT DROP AS
 WITH orgs_with_superadmin AS (
   SELECT DISTINCT "organizationId"

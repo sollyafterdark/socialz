@@ -102,6 +102,8 @@ mine.
 
 **In scope for DB-01:** Yes — `migration.sql` is this ticket's own file. **Fixed:** `rule2_ranked`/`rule3_ranked` now order candidates by health first (`NOT uo.disabled AND u."deletedAt" IS NULL AND u.activated`, healthy first) then earliest-`createdAt`, falling through to an unhealthy candidate only if no healthy one exists in that workspace (Rule 4's "cannot auto-resolve" still applies only to zero-member workspaces, not zero-*healthy*-member ones). `db-01-pre-migration-report.sql` updated to use the identical ordering and expose a new `auto_promoted_is_healthy` column. Re-validated against a disposable Postgres container with two new fixture cases (earliest-admin-disabled; all-admin-candidates-unhealthy) — migration output matched the report's predictions exactly in both.
 
+**Owner approval:** this fix is a deviation from ADR-0001's literal wording (the ADR says "earliest-created ADMIN"/"earliest-created member" with no health qualifier), so `migration.sql` flagged it explicitly as needing owner/PM sign-off rather than shipping it as an unstated implementation detail. **Approved: project owner, relayed by PM, 2026-09-15** (PR #4 review thread) — accepted as part of DB-01's fallback logic, not deferred to a follow-up ticket. Recorded directly in `migration.sql`'s comment block alongside the deviation note.
+
 ---
 
 ## Summary of disposition
@@ -111,7 +113,7 @@ mine.
 | 1 | No (devops-owned deploy scripts) | Documented as a cutover blocker in README + PR description; scope corrected per PM's mount-check question (see below) — README now says so |
 | 2 | Partial (wording only) | README wording corrected; actual repoint stays RBAC-04's |
 | 3 | Partial (wording only) | README restructured to separate compile-breaks from silent-behavior breaks; `organization.service.ts` gap flagged for RBAC-04, not fixed here |
-| 4 | Yes | Fixed directly in `migration.sql` and the report script, re-validated |
+| 4 | Yes | Fixed directly in `migration.sql` and the report script, re-validated; healthy-candidate deviation from ADR-0001's literal wording approved by owner, relayed by PM, 2026-09-15 |
 
 ## Correction applied (raised by PM, 2026-09-15, same session)
 
