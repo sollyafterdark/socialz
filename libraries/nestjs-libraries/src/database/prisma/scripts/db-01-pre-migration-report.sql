@@ -16,9 +16,12 @@
 --
 -- Query 1 below classifies every workspace by which of ADR-0001's four
 -- fallback rules would fire, and for rules 2-4 names exactly which user
--- would be auto-promoted to OWNER and why. Ordered so the non-obvious
--- cases (rules 2-4) surface first -- rule 1 (mechanical SUPERADMIN ->
--- OWNER, nothing to review) sorts last.
+-- would be auto-promoted to OWNER and why. Ordered so the cases needing
+-- the owner's attention surface first: Rule 1 workspaces where every
+-- resulting OWNER is unhealthy sort to the very top (rule1_all_owners_
+-- unhealthy = true), then the remaining non-obvious cases (rules 2-4),
+-- with plain Rule 1 (mechanical SUPERADMIN -> OWNER, healthy, nothing to
+-- review) sorting last.
 --
 -- Rules 2/3 match migration.sql's actual selection exactly: among
 -- candidates, a non-disabled / non-soft-deleted / activated ("healthy")
@@ -91,7 +94,8 @@ earliest_member AS (
     "organizationId", "userId", email, name, "createdAt", is_healthy
   FROM org_roles
   ORDER BY "organizationId", is_healthy DESC, "createdAt" ASC, id ASC
-)
+),
+report_rows AS (
 SELECT
   mc."organizationId",
   mc."organizationName",
@@ -148,7 +152,9 @@ FROM member_counts mc
 LEFT JOIN superadmin_health sh ON sh."organizationId" = mc."organizationId"
 LEFT JOIN earliest_admin ea ON ea."organizationId" = mc."organizationId"
 LEFT JOIN earliest_member em ON em."organizationId" = mc."organizationId"
-ORDER BY fallback_rule DESC, mc."organizationName";
+)
+SELECT * FROM report_rows
+ORDER BY COALESCE(rule1_all_owners_unhealthy, false) DESC, fallback_rule DESC, "organizationName";
 
 \echo ''
 \echo '=== DB-01 report: current SUPERADMIN rows (decide User.isSuperAdmin by hand) ==='

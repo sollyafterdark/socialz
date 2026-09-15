@@ -108,11 +108,13 @@ mine.
 
 | # | In scope for DB-01? | Action taken |
 |---|---|---|
-| 1 | No (devops-owned deploy scripts) | Documented as a cutover blocker in README + PR description; correction pending per PM's mount-check question (see below) |
+| 1 | No (devops-owned deploy scripts) | Documented as a cutover blocker in README + PR description; scope corrected per PM's mount-check question (see below) — README now says so |
 | 2 | Partial (wording only) | README wording corrected; actual repoint stays RBAC-04's |
 | 3 | Partial (wording only) | README restructured to separate compile-breaks from silent-behavior breaks; `organization.service.ts` gap flagged for RBAC-04, not fixed here |
 | 4 | Yes | Fixed directly in `migration.sql` and the report script, re-validated |
 
-## Correction in progress (raised by PM, 2026-09-15, same session)
+## Correction applied (raised by PM, 2026-09-15, same session)
 
-Finding 1's framing — and this PR's README as first written — said the `db push --accept-data-loss` hazard fires on "every container start." Checked at the PM's request: `docker inspect socialz-app` shows no bind mount of the repository into the container (only `/config`, `/uploads`, and three secret files are mounted). `schema.prisma` is therefore baked into the image at build time, not read live from disk. A bare restart of the *current* image re-runs `db push` against the same already-baked-in (old, 3-value) schema — a no-op, not a hazard. The hazard requires a **rebuild** of the image from a tree that includes this PR's `schema.prisma` change, followed by redeploying that new image — not a plain restart of what's running today. The underlying mechanism (db push bypassing `migration.sql`, no CASE remap, failure on legacy enum values once real data exists) is still real; only the "every restart" scope of the claim was too broad. README not yet corrected — pending PM sign-off on the wording.
+Finding 1's framing — and this PR's README as first written — said the `db push --accept-data-loss` hazard fires on "every container start." Checked at the PM's request: `docker inspect socialz-app` shows no bind mount of the repository into the container (only `/config`, `/uploads`, and three secret files are mounted). `schema.prisma` is therefore baked into the image at build time, not read live from disk. A bare restart of the *current* image re-runs `db push` against the same already-baked-in (old, 3-value) schema — a no-op, not a hazard. The hazard requires a **rebuild** of the image from a tree that includes this PR's `schema.prisma` change, followed by redeploying that new image — not a plain restart of what's running today. The underlying mechanism (db push bypassing `migration.sql`, no CASE remap, failure on legacy enum values once real data exists) is still real; only the "every restart" scope of the claim was too broad.
+
+**README corrected** (commit `e7704024`, approved by PM): the section is now titled "Rebuild-and-redeploy bypasses `migration.sql` entirely," states directly that a plain restart of the currently-running image is a no-op, and explains the actual hazard is a rebuild-from-a-tree-with-this-schema-change followed by redeploying that image, before `migration.sql` has been applied.
