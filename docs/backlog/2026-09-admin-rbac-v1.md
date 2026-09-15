@@ -109,6 +109,15 @@ Implements ADR-0003. New model: actor `userId`, scope (workspace-scoped vs.
 platform-scoped — must be distinguishable), action type, target type + id,
 metadata, timestamp. Plus a shared write-helper service other tickets call
 into (RBAC-01 through RBAC-06 all depend on this existing first).
+
+**Must also denormalize identifying details of actor and target onto the
+log row itself** (e.g. `actorName`/`actorEmail`, `targetName`/`targetEmail`
+as plain text fields, snapshotted at write time) — not solely a `userId`
+foreign key. Reason: once ADR-0002's purge job anonymizes a `User` row, an
+audit entry that only holds that row's id loses the human-readable context
+of what happened — the entire point of the log existing. The FK stays (for
+joins while the referenced row is still intact), the snapshot text is what
+survives after anonymization.
 **Blocks:** RBAC-01, RBAC-02(approval actions), RBAC-04, RBAC-05, RBAC-06.
 
 ### DB-05 — Content soft-delete purge job
@@ -153,11 +162,18 @@ needs — this guard's behavior silently breaks once DB-01 removes the
 release as DB-01, not after.
 **Depends on:** DB-01, DB-04.
 
-### RBAC-05 — Account removal (suspend + soft-delete)
+### RBAC-05 — Account removal (suspend + soft-delete) + content reassignment
 Two scopes sharing one implementation: workspace Owner/Admin can
 suspend/remove members of their own workspace; Platform Admin can do the
 same for any account in any workspace. Calls DB-03's soft-delete path.
 Audit-logged.
+
+Also includes the **admin-reassignment endpoint for orphaned content**
+that DB-03's soft-transfer design requires: lets a workspace Owner/Admin
+(or Platform Admin, any workspace) reassign a removed member's content —
+`Post.authorId` — to another active member. Depends on `Post.authorId`
+existing (added by DB-03). Audit-logged as its own action per ADR-0003,
+distinct from the account-removal audit entry.
 **Depends on:** DB-03, DB-04, RBAC-01, RBAC-04.
 
 ### RBAC-06 — Content removal (soft-delete)

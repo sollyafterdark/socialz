@@ -19,6 +19,13 @@ risks shipping actions with no record of who did them.
   vs. platform-scoped action — must be distinguishable, since a Platform
   Admin action may not belong to any single workspace), action type, target
   type + id, a metadata payload, timestamp.
+- **Actor and target identifying details (name/email) are denormalized onto
+  the log row itself, not read solely via the `userId`/target FK.** This
+  follows directly from ADR-0002: once the purge job anonymizes a `User`
+  row, any audit entry that only references that row's id would silently
+  lose the human-readable record of what happened — the log's entire
+  purpose. The FK is kept for joins while the row is intact; the
+  snapshotted text is what survives anonymization.
 - Every V1 admin action gets exactly one audit row, written in the same
   service call that performs the action — not queued/best-effort. If the
   write fails, that's a bug to surface, not silently swallow, since a
