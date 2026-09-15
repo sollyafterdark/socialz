@@ -44,3 +44,22 @@ GitHub-hosted runner for PR-time lint/build/automated review. Self-hosted runner
 ## 5. Email
 
 `suportsocialz@mpsolara.com` — Cloudflare Email Routing handles inbound forwarding only. Outbound "send as" requires a transactional provider (SPF/DKIM/DMARC on `mpsolara.com`) configured separately.
+
+## 7. V2 Scope: Token & Coupon System (deferred, not yet ticketed)
+
+Secure, targeted promotional/administrative tokens. Not built in V1 — this section exists so the design isn't lost before V2 starts.
+
+**Who can issue:** SUPERADMIN (Platform Admin) only. Never a workspace-level Owner or Admin — this grants free access or discounts against the platform operator's own revenue, so it belongs exclusively at the platform layer.
+
+**Architecture:** Opaque random token string + server-side database record — not a self-encoded/decodable token. The string carries no meaning of its own; all real data (bound email, workspace, perk type/amount, expiry, redemption state) lives in the record it looks up. This allows revocation and edits after issuing, and avoids the forgery risk of a self-encoded format.
+
+**Fields per token:**
+- Bound email — nullable. Set = single named recipient only; redemption is rejected if the redeemer's account doesn't match. Null = a global token, redeemable by anyone.
+- Target workspace (if applicable to the perk).
+- Perk type: subscription extension (1 week / 2 weeks / 1 month), free access to specific platforms, percentage or fixed-amount discount.
+- Expiry date — required on every token, no indefinitely-valid tokens.
+- Redemption state (`redeemed_at` / `redeemed_by`) — enforces single-use.
+
+**Redemption:** at signup or from the logged-in user's profile settings. On failure (wrong email, expired, already redeemed, doesn't exist), show one generic "this code isn't valid" message in all cases — never a distinct reason, to avoid letting someone probing codes learn which are real or who they belong to.
+
+**Audit logging:** token generation and redemption are both logged events, per the V1 audit-log requirement — this is an extension of that system when V2 starts, not a separate logging mechanism.
