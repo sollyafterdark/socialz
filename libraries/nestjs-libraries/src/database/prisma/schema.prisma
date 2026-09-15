@@ -142,7 +142,7 @@ model UserOrganization {
   userId         String
   organizationId String
   disabled       Boolean      @default(false)
-  role           Role         @default(USER)
+  role           Role         @default(EDITOR)
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
   organization   Organization @relation(fields: [organizationId], references: [id])
@@ -942,9 +942,12 @@ enum Provider {
 }
 
 enum Role {
-  SUPERADMIN
+  OWNER
   ADMIN
-  USER
+  EDITOR
+  CONTRIBUTOR
+  TRANSLATOR
+  VIEWER
 }
 
 enum APPROVED_SUBMIT_FOR_ORDER {
