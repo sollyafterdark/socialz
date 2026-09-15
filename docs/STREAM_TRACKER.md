@@ -3,7 +3,7 @@
 | # | Stream | Task | Status | Notes |
 |---|--------|------|--------|-------|
 | 1 | DevOps | Hardware/storage discovery audit | Done | Found /opt/socials, informed storage plan |
-| 2 | DevOps | Propose LV/ZFS/compose/tunnel plan | Approved, build in progress | Approved; compose edit paused pending sign-off on added Temporal+ES sizing (found app hard-requires Temporal at boot) |
+| 2 | DevOps | Propose LV/ZFS/compose/tunnel plan | Built, PR #1 open | Tunnel confirmed Healthy end-to-end; awaiting owner+PM merge review |
 | 3 | Architect | Gap-analysis discovery pass | Done | RBAC/i18n/admin/studio/auth gap map delivered; confirmed HEAD is v2.23.0-141-gb38c43fa |
 | 4 | Bootstrap | CLAUDE.md / CHARTER.md / agent files | Done | Pushed to main (3b3ca7cd) |
 | 5 | Owner | Describe UI idea | Waiting on owner | |
