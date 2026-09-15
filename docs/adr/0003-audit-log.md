@@ -25,9 +25,10 @@ risks shipping actions with no record of who did them.
   missing audit row for a destructive action defeats the purpose.
 - "Every V1 admin action" concretely means: role change (including
   promote/demote Owner and Platform Admin), account suspend, account
-  soft-delete, account restore, content soft-delete, content restore. The
-  eventual purge (ADR-0002) also gets a row, since it's the point recovery
-  becomes impossible.
+  soft-delete, account restore, content soft-delete, content restore, and
+  **reassigning a removed member's orphaned content to another active
+  member** (DB-03's soft-transfer design). The eventual purge (ADR-0002)
+  also gets a row, since it's the point recovery becomes impossible.
 - Each stream (auth-rbac, ui-ux where it triggers actions directly) is
   responsible for calling the shared audit-write helper at the point of
   action — this ADR does not mandate a specific interceptor/decorator

@@ -25,11 +25,28 @@ unrelated mechanism and is untouched by this ADR.
   immediately hidden from all normal UI/API reads, stops functioning
   (account: can't log in / act in any workspace; content: stops
   publishing/scheduling), but is not removed from the database.
-- A recurring purge job (BullMQ, daily) permanently deletes any row where
-  `deletedAt` is older than 30 days. Purge eligibility is computed at job
-  run time as `deletedAt + 30 days` — no separate "purge-at" column, since
-  that value is fully derivable and a second column would just be a second
-  place for the two to drift out of sync.
+- A recurring purge job (BullMQ, daily) processes any row where `deletedAt`
+  is older than 30 days. Purge eligibility is computed at job run time as
+  `deletedAt + 30 days` — no separate "purge-at" column, since that value is
+  fully derivable and a second column would just be a second place for the
+  two to drift out of sync.
+- **What "purge" does differs by model, and this is a deliberate asymmetry,
+  not an inconsistency:**
+  - `Post`: purge means hard delete. Nothing else is designed to hold a
+    surviving reference to a purged post's id.
+  - `User`: purge means **anonymize, not hard delete.** Per DB-03's
+    soft-transfer design, `Post.authorId` (and any future FK into `User`)
+    keeps pointing at the same user row indefinitely, including after that
+    user's account is removed from a workspace — that's the whole point of
+    "Former Member" attribution surviving removal. If the purge job hard-
+    deleted the `User` row 30 days later, every one of those references
+    would break (or cascade-delete content that was never itself removed)
+    silently, on a delay — the exact failure mode a reviewer would only
+    catch by testing 30 days out. Instead, the purge job replaces
+    name/email/avatar/other PII with a placeholder and flags the row as
+    purged, but keeps the row (and its id) alive. UI reads this flag to
+    render "Deactivated User" instead of "Jane Doe (Former Member)" — see
+    DB-03.
 - Because it's recoverable-by-design, there must be a "restore" path (at
   minimum an API endpoint; a UI affordance is a ui-ux ticket) that clears
   `deletedAt` for anything still inside the 30-day window. Once purged,
@@ -43,12 +60,15 @@ unrelated mechanism and is untouched by this ADR.
 ## Consequences
 
 - Two purge jobs conceptually (accounts, content) but one shared pattern —
-  the database ticket should build one reusable "soft-delete + purge" helper
-  rather than duplicating the query/job logic per model.
-- Cascading removals (e.g. removing an account: what happens to content they
-  authored?) is a real open question this ADR does not resolve — it's a
-  database-ticket-level design call, flagged explicitly there rather than
-  guessed at here.
+  the database ticket should build one reusable "soft-delete + purge" helper,
+  parameterized by outcome (hard-delete vs. anonymize) rather than
+  duplicating the query/job scheduling logic per model.
+- Cascading removals — what happens to content authored by a removed
+  account — is resolved by DB-03 as "soft transfer": content stays tied to
+  the workspace, `Post.authorId` keeps pointing at the (possibly later
+  anonymized) `User` row, and a workspace admin can reassign it to an active
+  member. This ADR's anonymize-not-delete rule for `User` purge exists
+  specifically to make that resolution durable past the 30-day mark.
 - Audit logging (ADR-0003) must record both the soft-delete and the eventual
   purge, since the purge is the point past which recovery becomes
   impossible — that's worth a durable record even after the row is gone.

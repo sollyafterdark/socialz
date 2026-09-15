@@ -54,16 +54,55 @@ overload `DRAFT`, which already means something in the publish pipeline).
 Exact field design is this ticket's call.
 **Blocks:** RBAC-03.
 
-### DB-03 — Account soft-delete + purge job
+### DB-03 — Account soft-delete + purge job, with soft-transfer of authored content
 Implements ADR-0002 for `User`. Reuses existing `User.deletedAt` (no new
-column). Adds a recurring BullMQ job that hard-deletes `User` rows (and
-whatever cascades a removed account needs — see open question below) past
-the 30-day window. Build as a reusable helper, not one-off per model, since
-DB-05 needs the identical pattern for `Post`.
-**Open question this ticket must resolve, not guess at:** when a workspace
-member's account is removed, what happens to content they authored? Left
-in place under the workspace, reassigned, or also soft-deleted? Flag back
-to the project owner if it's not answerable from existing conventions.
+column for the soft-delete itself). Build the purge job as a reusable
+helper, not one-off per model, since DB-05 needs the same scheduling
+pattern for `Post` — but note the two purges have different *outcomes* (see
+below and ADR-0002), so the helper must be parameterized, not identical
+logic.
+
+**Resolved: Soft Transfer.** When a workspace member's account is removed,
+their content is not touched, cancelled, or reassigned automatically —
+`Post.authorId` keeps pointing at the removed user's `User` row. A
+workspace admin can later reassign orphaned content to another active
+member as an explicit action.
+
+**This ticket must add `Post.authorId` — it does not currently exist.**
+The `Post` model today has no author/creator reference to `User` at all
+(only `organizationId` and `integrationId`). Add it as a nullable
+`authorId: String?` (nullable because pre-existing posts and some
+`creationMethod` values like API/MCP may have no clear single author) with
+a relation to `User`. **Coordinate with DB-02**, which lands around the
+same time and also modifies `Post` — sequence or combine the two
+migrations so they don't conflict.
+
+**Purge behavior (per the ADR-0002 amendment):** the recurring purge job
+for `User` does **not** hard-delete the row 30 days after `deletedAt`. It
+anonymizes it instead — replace name/email/avatar/other PII with a
+placeholder, set a `purged`/anonymized flag — and keeps the row alive so
+`Post.authorId` never points at a missing row. This is what makes the two
+UI states resolvable:
+- Account removed from this workspace, but the `User` row is intact
+  elsewhere / not yet purged → UI shows **"Jane Doe (Former Member)"**.
+- Account has been purged (anonymized) → UI shows **"Deactivated User"**.
+(Actual label rendering is UI-02/UI-05's job; this ticket only needs to
+expose the two states — `deletedAt` set vs. anonymized flag set — for them
+to read.)
+
+**Applies to all content states, not just published posts.** A removed
+Contributor's unapproved draft, or a removed member's still-scheduled
+post, gets the identical soft-transfer treatment — it is **not**
+auto-cancelled. (This is distinct from DB-05's cancel-on-removal behavior,
+which only applies when *content itself* is explicitly soft-deleted by an
+admin, not when its author's account is removed. Don't conflate the two.)
+
+**Admin-reassignment of orphaned content** is an auditable action per
+ADR-0003 (added to that ADR's action list) — the reassignment endpoint
+itself belongs in auth-rbac's RBAC-05, but depends on the `authorId` field
+this ticket adds.
+**Blocks:** RBAC-05 (reassignment endpoint depends on `Post.authorId`).
+**Coordinate with:** DB-02 (concurrent `Post` schema changes).
 
 ### DB-04 — `AuditLog` model
 Implements ADR-0003. New model: actor `userId`, scope (workspace-scoped vs.
