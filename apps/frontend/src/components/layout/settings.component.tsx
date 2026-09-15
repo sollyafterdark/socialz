@@ -32,6 +32,7 @@ import { useT } from '@gitroom/react/translation/get.transation.service.client';
 import { SVGLine } from '@gitroom/frontend/components/launches/launches.component';
 import { GlobalSettings } from '@gitroom/frontend/components/settings/global.settings';
 import { ApprovedAppsComponent } from '@gitroom/frontend/components/approved-apps/approved-apps.component';
+import { LEGAL_NAME, ABN } from '@gitroom/helpers/utils/branding';
 export const SettingsPopup: FC<{
   getRef?: Ref<any>;
 }> = (props) => {
@@ -146,6 +147,10 @@ export const SettingsPopup: FC<{
               <LogoutComponent />
             </div>
           )}
+          <div className="mt-4 text-[12px] text-textItemBlur">
+            {LEGAL_NAME}
+            {!!ABN && ` · ABN ${ABN}`}
+          </div>
         </div>
       </div>
       <div className="bg-newBgColorInner flex-1 flex-col flex p-[20px] gap-[12px]">
