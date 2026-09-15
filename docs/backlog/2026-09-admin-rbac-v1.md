@@ -247,11 +247,12 @@ above.
 Per the project owner: do not scope this yet, but keep it visible so it
 isn't lost.
 
-- Dynamic token/coupon system. Design intent for later: a token encodes
-  type + target (specific client, or global/anyone) + action (free-access
-  duration, discount type/amount, or feature unlock) directly in the token;
-  redeemable at signup/login or later from profile settings; both
-  client-specific and global tokens must be supported.
+- Dynamic token/coupon system. Full design now captured in `docs/CHARTER.md`
+  §7 (opaque server-side token records, not self-encoded; SUPERADMIN/Platform
+  Admin-only issuance; nullable bound-email for single-recipient vs. global
+  tokens; required expiry; single-use redemption; generic failure message on
+  redemption to avoid probing) — treat that section as the source of truth,
+  not this summary line.
 - Financial/subscription dashboard.
 - System-wide broadcasts.
 - Feature flags.
