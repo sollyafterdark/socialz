@@ -30,6 +30,16 @@
 -- actually log in -- worth the owner's attention even though it's not a
 -- different rule.
 --
+-- Rule 1 itself is NOT changed by this report or by migration.sql: every
+-- SUPERADMIN row still maps to OWNER mechanically, regardless of health,
+-- exactly as ADR-0001 specifies -- there is no "pick one candidate"
+-- decision for Rule 1 the way there is for Rules 2/3. `rule1_all_owners_
+-- unhealthy` is purely informational: it flags workspaces where every
+-- resulting OWNER (i.e. every current SUPERADMIN row) is disabled,
+-- deleted, or deactivated, so the workspace comes out with technically-
+-- valid OWNER row(s) that nobody can actually use -- worth the owner's
+-- attention before cutover, without altering which rows become OWNER.
+--
 -- Query 2 lists every row currently SUPERADMIN, so the owner can decide
 -- by hand which of those users should *additionally* get
 -- User.isSuperAdmin = true (Platform Admin). That decision is manual —
@@ -61,6 +71,13 @@ member_counts AS (
   FROM "Organization" o
   LEFT JOIN org_roles r ON r."organizationId" = o.id
   GROUP BY o.id, o.name
+),
+superadmin_health AS (
+  SELECT "organizationId",
+         bool_or(is_healthy) AS any_healthy_superadmin
+  FROM org_roles
+  WHERE role = 'SUPERADMIN'
+  GROUP BY "organizationId"
 ),
 earliest_admin AS (
   SELECT DISTINCT ON ("organizationId")
@@ -108,6 +125,12 @@ SELECT
     WHEN mc.member_count > 0 THEN em.is_healthy
   END AS auto_promoted_is_healthy,
   CASE
+    WHEN mc.superadmin_count > 0 THEN NOT COALESCE(sh.any_healthy_superadmin, false)
+    ELSE NULL
+  END AS rule1_all_owners_unhealthy,
+  CASE
+    WHEN mc.superadmin_count > 0 AND NOT COALESCE(sh.any_healthy_superadmin, false) THEN
+      'Rule 1: has SUPERADMIN row(s) -> map to OWNER mechanically (unchanged); all resulting OWNERs unhealthy, review before cutover'
     WHEN mc.superadmin_count > 0 THEN
       'Rule 1: has SUPERADMIN row(s) -> map to OWNER mechanically, no auto-promotion decision needed'
     WHEN mc.admin_count > 0 AND ea.is_healthy THEN
@@ -122,6 +145,7 @@ SELECT
       'Rule 4: zero members -- cannot auto-resolve, flag for manual review'
   END AS reason
 FROM member_counts mc
+LEFT JOIN superadmin_health sh ON sh."organizationId" = mc."organizationId"
 LEFT JOIN earliest_admin ea ON ea."organizationId" = mc."organizationId"
 LEFT JOIN earliest_member em ON em."organizationId" = mc."organizationId"
 ORDER BY fallback_rule DESC, mc."organizationName";

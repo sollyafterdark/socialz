@@ -170,7 +170,16 @@ be auto-resolved" carve-out being reserved for Rule 4 alone). The report
 script's predicted `auto_promoted_user_id`/`auto_promoted_is_healthy` per
 workspace matched the migration's actual output exactly in every case.
 
-All three disposable containers were removed after validation;
+Re-run a fourth time on a fourth fresh disposable container, fixture
+further extended with a workspace whose sole `SUPERADMIN` is disabled
+(Rule 1, not Rule 2/3). Confirmed `migration.sql`'s Rule 1 behavior is
+genuinely unchanged — that disabled `SUPERADMIN` row still became `OWNER`
+mechanically, same as a healthy one would — while the report correctly
+flagged this workspace with `rule1_all_owners_unhealthy = true` and the
+distinct Rule 1 reason text, purely informational and without predicting
+a different outcome than what the migration actually did.
+
+All four disposable containers were removed after validation;
 `socialz-postgres` was only ever touched by the read-only report queries
 below.
 
@@ -183,7 +192,7 @@ another transaction could otherwise insert or update a row — making the
 fallback computation and the migrated data agree by explicit construction
 rather than by incidental statement ordering.
 
-## ⚠️ Deploy path bypasses `migration.sql` entirely — found by ultrareview, verified
+## ⚠️ Rebuild-and-redeploy bypasses `migration.sql` entirely — found by ultrareview, verified
 
 **Found by `/code-review ultra`, confirmed by direct inspection of the live
 `socialz-app` container.** The running container's entrypoint (`docker
@@ -196,39 +205,53 @@ pm2-run: pm2 delete all || true && pnpm run prisma-db-push && pnpm run --paralle
 prisma-db-push: pnpm dlx prisma@6.5.0 db push --accept-data-loss --schema ./libraries/.../schema.prisma
 ```
 
-**This runs on every container start** (deploy, crash restart, host
-reboot) — not just the first one. `db push` reconciles the live database
-directly to whichever `schema.prisma` is in the image; it has no concept
-of `migrations/` and will not run `migration.sql`'s CASE-based remap or
-fallback-owner logic. Its generated `ALTER COLUMN ... TYPE ... USING
-(role::text::"Role_new")` has no mapping for `SUPERADMIN`/`USER`, so on a
-database that still has any row in those values, the cast raises `invalid
-input value for enum` and the whole `&&` chain aborts before
-`pnpm run --parallel pm2` ever runs — the app processes never start.
-Postgres aborts the failed statement's transaction atomically, so this
-fails as a hard outage (container won't come up) rather than as silent
-data corruption — but it is still a self-inflicted outage this PR must
-not walk into blind.
+This runs on every container start. `db push` reconciles the live
+database directly to whichever `schema.prisma` is baked into the *image*;
+it has no concept of `migrations/` and will not run `migration.sql`'s
+CASE-based remap or fallback-owner logic.
+
+**The hazard is specifically: rebuilding the image from a tree that
+includes this PR's `schema.prisma` change, then redeploying that new
+image, before `migration.sql` has been applied.** Checked directly
+(`docker inspect socialz-app`): the container has no bind mount of the
+repository — only `/config`, `/uploads`, and three secret files are
+mounted. `schema.prisma` is baked in at build time, not read live from
+disk. **A plain restart of the currently-running image is a no-op**: it
+re-runs `db push` against the same already-baked-in (old, 3-value)
+schema, which already matches the live database, so there's nothing for
+`db push` to do. The risk only exists once a new image is built from a
+tree containing the new enum and that image is what gets (re)started.
+
+When that happens on a database that still has any `SUPERADMIN`/`USER`
+row, `db push`'s generated `ALTER COLUMN ... TYPE ... USING
+(role::text::"Role_new")` has no mapping for those retired values, so the
+cast raises `invalid input value for enum` and the whole `&&` chain
+aborts before `pnpm run --parallel pm2` ever runs — the app processes
+never start. Postgres aborts the failed statement's transaction
+atomically, so this fails as a hard outage (container won't come up)
+rather than as silent data corruption — but it is still a self-inflicted
+outage this PR must not walk into blind.
 
 **This means merging this PR's `schema.prisma` change is not enough by
 itself, and the ordering matters:** `migration.sql` (via the baselined
 `prisma migrate deploy` above, or a manual `psql` apply after backup)
-**must be applied before the next `socialz-app` container restart of any
-kind** — not just before some notional "cutover" — because that restart
-will run `db push --accept-data-loss` regardless of whether anyone
-intended a deploy that day. If `migration.sql` has already been applied
-by the time `db push` runs, the live schema already matches
-`schema.prisma` and `db push` is a no-op for the `Role` enum; nothing
-extra happens. On the current, empty `socialz-postgres` (0
-`UserOrganization` rows) this specific crash can't fire today — there's
-no `SUPERADMIN`/`USER` value for the cast to fail on — but that stops
-being true the moment real workspaces exist, and this hazard needs a real
-fix before then. **Out of DB-01's scope** (`Dockerfile.dev` and
-`package.json`'s deploy scripts belong to the devops stream), flagged
-here as a hard blocker for the actual cutover, not something this PR can
-resolve by itself. Recommend devops add a migration-status check (or gate
-`prisma-db-push` behind `prisma migrate status`) before RBAC-04's cutover
-window, not merely reorder the manual steps by hand.
+**must be applied before any image is rebuilt from a tree containing this
+schema change and (re)deployed** — not just before some notional
+"cutover" that happens to be scheduled separately from the next deploy.
+If `migration.sql` has already been applied by the time that new image's
+`db push` runs, the live schema already matches `schema.prisma` and
+`db push` is a no-op for the `Role` enum; nothing extra happens. On the
+current, empty `socialz-postgres` (0 `UserOrganization` rows) this
+specific crash can't fire today regardless — there's no `SUPERADMIN`/
+`USER` value for the cast to fail on — but that stops being true the
+moment real workspaces exist, and this hazard needs a real fix before
+then. **Out of DB-01's scope** (`Dockerfile.dev` and `package.json`'s
+deploy scripts belong to the devops stream), flagged here as a hard
+blocker for the actual cutover, not something this PR can resolve by
+itself. Recommend devops add a migration-status check (or gate
+`prisma-db-push` behind `prisma migrate status`) as part of the build/
+deploy pipeline before RBAC-04's cutover window, not merely reorder the
+manual steps by hand.
 
 ## Code that will not compile — and code that will silently misbehave
 
