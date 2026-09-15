@@ -46,6 +46,15 @@
 
 BEGIN;
 
+-- Take the ACCESS EXCLUSIVE lock up front, before Step 1 reads the table.
+-- Step 2 would acquire this same lock implicitly when it gets there, but
+-- taking it here closes the small window between Step 1's read and
+-- Step 2's ALTER during which another transaction could otherwise insert
+-- or update a UserOrganization row, making the fallback computation and
+-- the actual migrated data agree by explicit construction rather than by
+-- incidental ordering.
+LOCK TABLE "UserOrganization" IN ACCESS EXCLUSIVE MODE;
+
 -- Step 1: compute rule-2 / rule-3 fallback promotions from the CURRENT
 -- (pre-migration) role values, before the enum/column swap in Step 2
 -- removes those values. Rule 1 needs no computation -- it falls out of

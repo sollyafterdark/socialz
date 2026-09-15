@@ -155,9 +155,20 @@ workspaces to confirm the *earliest-created* tiebreak. The report
 correctly classified all four; the migration correctly produced exactly
 one `OWNER` per non-empty workspace, left the zero-member workspace
 untouched, and left every other role's mapping exact (`ADMIN`→`ADMIN` for
-non-promoted admins, `USER`→`EDITOR` for non-promoted members). The
-disposable container was removed after validation; `socialz-postgres` was
-only ever touched by the read-only report queries below.
+non-promoted admins, `USER`→`EDITOR` for non-promoted members). Re-run
+against a second fresh disposable container after adding the explicit
+`LOCK TABLE` statement (see below) — same fixture, identical results. Both
+disposable containers were removed after validation; `socialz-postgres`
+was only ever touched by the read-only report queries below.
+
+`migration.sql` also takes an explicit `LOCK TABLE "UserOrganization" IN
+ACCESS EXCLUSIVE MODE` immediately after `BEGIN`, before Step 1 reads the
+table. Step 2's `ALTER TABLE ... TYPE ...` would acquire this same lock
+implicitly when it gets there regardless, but taking it up front closes
+the small window between Step 1's read and Step 2's ALTER during which
+another transaction could otherwise insert or update a row — making the
+fallback computation and the migrated data agree by explicit construction
+rather than by incidental statement ordering.
 
 ## Code that will not compile once this schema change is deployed
 
