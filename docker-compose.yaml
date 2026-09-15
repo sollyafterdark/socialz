@@ -126,7 +126,7 @@ services:
     restart: unless-stopped
     networks: [egress, edge]
     secrets: [cloudflare_tunnel_token]
-    command: sh -c 'exec cloudflared tunnel run --token "$$(cat /run/secrets/cloudflare_tunnel_token)"'
+    command: ['tunnel', 'run', '--token-file', '/run/secrets/cloudflare_tunnel_token']
 
   # -----------------------
   # Temporal (required at app boot — see libraries/nestjs-libraries/src/temporal/)
