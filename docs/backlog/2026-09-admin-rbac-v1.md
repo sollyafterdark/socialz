@@ -36,11 +36,29 @@ brief's "verify before ticketing as new work" instruction:
 Implements ADR-0001. Change `Role` enum on `UserOrganization` from
 `{SUPERADMIN, ADMIN, USER}` to `{OWNER, ADMIN, EDITOR, CONTRIBUTOR,
 TRANSLATOR, VIEWER}`. Data migration: `ADMIN`→`ADMIN`, `USER`→`EDITOR`,
-`SUPERADMIN`→`OWNER`. Migration script must first output a report (which
-rows are currently `SUPERADMIN`, which org, which user/email) for the
-project owner to review before/alongside the cutover, since some of those
-users may also need `User.isSuperAdmin = true` set by hand (a judgment
-call ADR-0001 explicitly does not automate). Include a rollback plan.
+`SUPERADMIN`→`OWNER`.
+
+**Zero-`SUPERADMIN`-workspace fallback (required, per ADR-0001 — this was a
+real bug in the original ticket draft):** the mechanical mapping above
+only produces an `OWNER` in workspaces that already had a `SUPERADMIN`
+row. Nothing in the current schema guarantees every workspace has one.
+Any workspace that doesn't must get an explicit fallback owner, applied in
+this order and **listed in the report, not applied silently**:
+1. Had `SUPERADMIN` → maps to `OWNER` (the default case above).
+2. No `SUPERADMIN`, has an `ADMIN` → promote that workspace's
+   earliest-created `ADMIN` to `OWNER`.
+3. No `SUPERADMIN`, no `ADMIN` → promote the workspace's earliest-created
+   member (any role) to `OWNER`.
+4. Zero members → cannot auto-resolve; report it, don't guess.
+
+The pre-migration report must therefore cover, per workspace: which rule
+fired (1–4), and for rules 2–4, exactly which user was auto-promoted and
+why — so the project owner can review every non-obvious promotion, not
+just the rule-1 cases. Also still needed, as before: rows currently
+`SUPERADMIN` so the owner can decide by hand which of those users should
+additionally get `User.isSuperAdmin = true` (Platform Admin) — that
+decision stays manual, ADR-0001 does not automate it. Include a rollback
+plan.
 **Blocks:** RBAC-01 through RBAC-08.
 
 ### DB-02 — Contributor approval state on `Post`
@@ -151,15 +169,59 @@ Owner approves (publishes) or rejects (back to Contributor with a reason).
 State transitions only — the review-queue UI is UI-06.
 **Depends on:** DB-02, RBAC-02.
 
-### RBAC-04 — Platform Admin: promote/demote + repoint `SuperAdminGuard`
+### RBAC-04 — Platform Admin: promote/demote + repoint every `SUPERADMIN` call site
 Implements ADR-0001's platform layer. Promote/demote endpoints on
 `User.isSuperAdmin` with the same last-remaining-holder invariant as
-RBAC-01, scoped globally. Also: audit every current call site of
-`SuperAdminGuard` (org-scoped today) and repoint each to either
-`User.isSuperAdmin` or an `OWNER` check, per what that call site actually
-needs — this guard's behavior silently breaks once DB-01 removes the
-`SUPERADMIN` enum value it depends on, so this must land in the same
-release as DB-01, not after.
+RBAC-01, scoped globally.
+
+**Security-sensitive — the repoint table below must ship in the PR itself,
+reviewed line by line before merge, not trusted to have been done
+correctly after the fact.** A guard repointed to the wrong check is either
+a privilege escalation or an accidental lockout. Verified by direct code
+inspection (2026-09-15) — every current reference to the org-scoped
+`SUPERADMIN` concept, and what it must become once DB-01 removes that enum
+value:
+
+| # | Location | What it does | Resolves to |
+|---|---|---|---|
+| 1 | `super.admin.guard.ts` (`SuperAdminGuard`, checks `hasSuperAdminUser(org.id)`) | Guard class used on the public API | **See flag below — not a mechanical rename.** |
+| 2 | `public.integrations.controller.ts:385` (`GET /public-api/v1/integrations/users`) | Public-API impersonation-search endpoint, gated by `SuperAdminGuard` | Same flag as #1 |
+| 3 | `public.auth.middleware.ts:40` | Synthesizes `req.org` for OAuth-token public-API callers, hardcodes `role: 'SUPERADMIN'` | `role: 'OWNER'` — represents full authority over the caller's own org, not platform-wide anything |
+| 4 | `public.auth.middleware.ts:58` | Same, for API-key public-API callers | `role: 'OWNER'` |
+| 5 | `permissions.service.ts:42,131` | CASL billing gate: `Sections.ADMIN` allowed when `['ADMIN','SUPERADMIN'].includes(permission)` | `['ADMIN','OWNER'].includes(permission)` |
+| 6 | `permissions.guard.ts` | Passes `org.users[0].role` into #5 | No logic change — just carries the new enum value through |
+| 7 | `users.controller.ts:135` (`GET /user/self`, `publicApi` field) | Only exposes `org.apiKey` to the frontend for Admin-or-higher | `role === 'OWNER' \|\| role === 'ADMIN'` |
+| 8 | `users.controller.ts` `getImpersonate`/`setImpersonate`/`switchUser` (~150–200) | The real cross-org impersonation feature | **No change** — already gated on `user.isSuperAdmin` (global), already correct as Platform Admin |
+| 9 | `stripe.service.ts:221` | Resyncs Stripe customer email after a login switch; comment already says "Owner-only" | `role === 'OWNER'` |
+| 10 | `organization.repository.ts:36` (`createMaxUser`) | Creator of an internal max-tier org becomes its owner | `role: Role.OWNER` |
+| 11 | `organization.repository.ts:366` (`createOrgAndUser` — **the standard signup flow**) | Every new org's creator becomes its owner | `role: Role.OWNER` |
+| 12 | `organization.repository.ts:495` (`disableOrEnableNonSuperAdminUsers`) | Protects the org's owner from being disabled along with the rest of the org | `role: { not: Role.OWNER } }` |
+| 13 | `users.repository.ts:~130` (`getUserWithActiveSubscriptionByEmail`) | Signup/login dedupe: finds an existing paid workspace owned by this email | `role: Role.OWNER` |
+| 14 | `users.service.ts:90` (`getOrgsToDeleteForAccount`) | Self-account-deletion: which orgs does this user *own* (fully delete) vs. just leave | `role === Role.OWNER` |
+| 15 | `users.service.ts:111` (`deleteAccount`) | Same function, deletion branch | `role === Role.OWNER` |
+| 16 | `organization.selector.tsx:82,94` | Org-switcher dropdown display label | `role === 'OWNER'`, label "Owner" |
+| 17 | `user.context.tsx:15,28` | Frontend `User`/role TS type definitions | Full six-role union |
+| 18 | `top.menu.tsx:191,250,273,303` | Nav-item visibility (media agent, affiliate link, billing, settings) per role array | Replace `'SUPERADMIN'` with `'OWNER'` in each array — **and revisit whether `EDITOR`/`CONTRIBUTOR`/`TRANSLATOR`/`VIEWER` should also see each item; don't just find-and-replace the string.** Cross-check against UI-01/UI-02. |
+| 19 | `teams.component.tsx:115,122` | Team-management "can I act on this member" level comparison, currently a 3-level scale (`USER`<`ADMIN`<`SUPERADMIN`) | Needs a real 6-level hierarchy, not a rename — this is UI-02's scope already; flag the coupling here so it isn't built twice |
+
+**Flag on #1/#2 — resolve explicitly, don't silently carry forward:**
+`PublicAuthMiddleware` (#3/#4) synthesizes a fake org context with
+`role: 'SUPERADMIN'` for **every** authenticated public-API caller,
+regardless of who they are. Since `SuperAdminGuard` (#1) just checks
+"does this org have a `SUPERADMIN`," and the middleware fakes that role
+unconditionally, **`SuperAdminGuard` currently always passes for any
+valid public-API key/OAuth token** on this route — it is not actually
+restricting the impersonation-search endpoint (#2) to real platform
+admins today. This is a pre-existing gap, not something introduced by
+this migration, but the migration forces a decision: mechanically
+repointing `hasSuperAdminUser` to check `OWNER` instead just preserves
+the same always-passes behavior (the middleware would fake `OWNER`
+instead). Fixing it for real means checking `user.isSuperAdmin` against
+the actual authenticated actor, which the public-API auth path doesn't
+currently establish. **This needs an explicit decision — is
+`GET /public-api/v1/integrations/users` supposed to be reachable by any
+org's API key holder, or only a true Platform Admin — before this ticket
+can close it out.**
 **Depends on:** DB-01, DB-04.
 
 ### RBAC-05 — Account removal (suspend + soft-delete) + content reassignment

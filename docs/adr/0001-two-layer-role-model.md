@@ -72,6 +72,24 @@ tiers — this is an auth/RBAC schema change):
   it's a judgment call, not a mechanical one — whether any of them should
   *also* get `User.isSuperAdmin = true` (Platform Admin). The migration does
   not do this automatically.
+- **Every workspace must come out of this migration with at least one
+  `OWNER` — a mechanical mapping alone does not guarantee that.** A
+  workspace that never had a `SUPERADMIN` row (the schema allows this;
+  nothing enforces exactly one `SUPERADMIN` per org today) would otherwise
+  land with zero `OWNER`s, violating this ADR's core invariant from the
+  moment the migration completes. The migration must therefore apply an
+  explicit fallback, per workspace, in this order, and every fallback
+  application must appear in the pre-migration report — never silent:
+  1. Workspace already has a `SUPERADMIN` row → maps to `OWNER` as above.
+  2. No `SUPERADMIN`, but has at least one `ADMIN` → auto-promote that
+     workspace's earliest-created `ADMIN` (by `UserOrganization.createdAt`)
+     to `OWNER`.
+  3. No `SUPERADMIN` and no `ADMIN` (only members mapping to `EDITOR` /
+     `TRANSLATOR` / `VIEWER`) → auto-promote the workspace's
+     earliest-created member, any role, to `OWNER`.
+  4. Workspace has zero members at all → cannot be auto-resolved. Flag in
+     the report as needing manual resolution; the migration must not guess
+     an owner for an empty workspace.
 
 **`SuperAdminGuard`** (`apps/backend/src/services/auth/super.admin.guard.ts`)
 currently checks the org-scoped role, which no longer exists after this
