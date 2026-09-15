@@ -93,10 +93,19 @@ tiers — this is an auth/RBAC schema change):
 
 **`SuperAdminGuard`** (`apps/backend/src/services/auth/super.admin.guard.ts`)
 currently checks the org-scoped role, which no longer exists after this
-migration. Its ~handful of call sites must be audited and repointed to
-either `User.isSuperAdmin` (if the check was actually meant to be
-platform-wide) or dropped/replaced by an `OWNER` check (if it was meant to
-be workspace-wide). This is an auth-rbac ticket, not automatic.
+migration. Full audit (RBAC-04 in the backlog) found 19 references, not a
+"handful" — each repointed to either `User.isSuperAdmin` or an `OWNER`
+check per what it actually guards. One of them was not a mechanical
+rename: `SuperAdminGuard`'s only real call site gates a public-API
+impersonation-search endpoint, and `PublicAuthMiddleware` fakes an
+always-passing org role for every public-API caller regardless of who
+they are — so that endpoint has never actually been restricted to
+platform admins. Decision: **fix it, don't preserve it under a new name.**
+OAuth-token callers get checked against the real user behind the token
+(`OAuthAuthorization.userId` → `User.isSuperAdmin`); plain org-API-key
+callers — who have no associated user at all — are rejected outright on
+this route. Some existing callers relying on the old always-open behavior
+will start getting 403s; that is the fix working, not a regression.
 
 **Contributor approval** is a new, narrow mechanism — explicitly *not* a
 reuse of `Post.submittedForOrderId` / `Post.approvedSubmitForOrder`. Those
@@ -125,5 +134,10 @@ instead.
   populated database, and it is squarely in the "database migrations are
   PR-only, needs owner+PM sign-off" tier.
 - `SuperAdminGuard`'s current behavior (org-scoped) quietly disappears when
-  the enum value it depends on is removed; every call site must be checked
-  by hand, not assumed safe.
+  the enum value it depends on is removed; every call site was checked by
+  hand (RBAC-04's table), not assumed safe — and one of them turned out to
+  be an actual pre-existing access-control gap, not just a rename.
+- Fixing that gap for real is a deliberate behavior change on a live
+  public-API endpoint: some callers that were incidentally relying on it
+  being unrestricted will start being rejected. Accepted by the project
+  owner as the correct outcome, not deferred to avoid breaking them.

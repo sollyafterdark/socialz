@@ -27,6 +27,13 @@ brief's "verify before ticketing as new work" instruction:
   working as-is. The one real gap: both paths currently only accept
   `'USER' | 'ADMIN'` as the role — see RBAC-08 below, which extends the
   existing flow rather than replacing it.
+- **User impersonation ("Login As")** — `docs/ui-vision.md`'s "Additional
+  recommended features" list asks for this; it's already fully built —
+  `GET/POST /user/impersonate` and `POST /user/switch`
+  (`users.controller.ts`), correctly gated on the global `user.isSuperAdmin`
+  flag (i.e. already Platform-Admin-scoped, not a per-workspace concept).
+  No ticket needed. (A different, unrelated impersonation-search endpoint
+  on the *public API* had a real access-control gap — see RBAC-04's table.)
 
 ---
 
@@ -184,10 +191,10 @@ value:
 
 | # | Location | What it does | Resolves to |
 |---|---|---|---|
-| 1 | `super.admin.guard.ts` (`SuperAdminGuard`, checks `hasSuperAdminUser(org.id)`) | Guard class used on the public API | **See flag below — not a mechanical rename.** |
-| 2 | `public.integrations.controller.ts:385` (`GET /public-api/v1/integrations/users`) | Public-API impersonation-search endpoint, gated by `SuperAdminGuard` | Same flag as #1 |
-| 3 | `public.auth.middleware.ts:40` | Synthesizes `req.org` for OAuth-token public-API callers, hardcodes `role: 'SUPERADMIN'` | `role: 'OWNER'` — represents full authority over the caller's own org, not platform-wide anything |
-| 4 | `public.auth.middleware.ts:58` | Same, for API-key public-API callers | `role: 'OWNER'` |
+| 1 | `super.admin.guard.ts` (`SuperAdminGuard`, checks `hasSuperAdminUser(org.id)`) | Guard class — confirmed by grep its *only* call site anywhere in the codebase is #2 | **Delete**, along with `organization.service.ts#hasSuperAdminUser` and `organization.repository.ts#getSuperAdminUser` (also unused elsewhere once this lands). Replaced by a real check — see resolution below. |
+| 2 | `public.integrations.controller.ts:385` (`GET /public-api/v1/integrations/users`) | Public-API impersonation-search endpoint | **Real fix, not a rename — see resolution below.** |
+| 3 | `public.auth.middleware.ts:40` | Synthesizes `req.org` for OAuth-token (`pos_...`) public-API callers, hardcodes `role: 'SUPERADMIN'` | `role: 'OWNER'` for the org-permission fake (unrelated to #2's fix), **plus**: this is the one public-API auth path with a real user behind it (`OAuthAuthorization.userId`) — must additionally resolve that user and attach `isSuperAdmin` to the request for #2's new check to read. |
+| 4 | `public.auth.middleware.ts:58` | Same, for plain org-`apiKey` public-API callers | `role: 'OWNER'` for the fake. **No user to attach — a static org API key has no associated human user at all** (confirmed: `getOrgByApiKey` only ever looks up `Organization`, nothing else). This is *why* #2 must reject this auth mode outright, not just check-and-pass. |
 | 5 | `permissions.service.ts:42,131` | CASL billing gate: `Sections.ADMIN` allowed when `['ADMIN','SUPERADMIN'].includes(permission)` | `['ADMIN','OWNER'].includes(permission)` |
 | 6 | `permissions.guard.ts` | Passes `org.users[0].role` into #5 | No logic change — just carries the new enum value through |
 | 7 | `users.controller.ts:135` (`GET /user/self`, `publicApi` field) | Only exposes `org.apiKey` to the frontend for Admin-or-higher | `role === 'OWNER' \|\| role === 'ADMIN'` |
@@ -204,24 +211,33 @@ value:
 | 18 | `top.menu.tsx:191,250,273,303` | Nav-item visibility (media agent, affiliate link, billing, settings) per role array | Replace `'SUPERADMIN'` with `'OWNER'` in each array — **and revisit whether `EDITOR`/`CONTRIBUTOR`/`TRANSLATOR`/`VIEWER` should also see each item; don't just find-and-replace the string.** Cross-check against UI-01/UI-02. |
 | 19 | `teams.component.tsx:115,122` | Team-management "can I act on this member" level comparison, currently a 3-level scale (`USER`<`ADMIN`<`SUPERADMIN`) | Needs a real 6-level hierarchy, not a rename — this is UI-02's scope already; flag the coupling here so it isn't built twice |
 
-**Flag on #1/#2 — resolve explicitly, don't silently carry forward:**
-`PublicAuthMiddleware` (#3/#4) synthesizes a fake org context with
-`role: 'SUPERADMIN'` for **every** authenticated public-API caller,
-regardless of who they are. Since `SuperAdminGuard` (#1) just checks
-"does this org have a `SUPERADMIN`," and the middleware fakes that role
-unconditionally, **`SuperAdminGuard` currently always passes for any
-valid public-API key/OAuth token** on this route — it is not actually
-restricting the impersonation-search endpoint (#2) to real platform
-admins today. This is a pre-existing gap, not something introduced by
-this migration, but the migration forces a decision: mechanically
-repointing `hasSuperAdminUser` to check `OWNER` instead just preserves
-the same always-passes behavior (the middleware would fake `OWNER`
-instead). Fixing it for real means checking `user.isSuperAdmin` against
-the actual authenticated actor, which the public-API auth path doesn't
-currently establish. **This needs an explicit decision — is
-`GET /public-api/v1/integrations/users` supposed to be reachable by any
-org's API key holder, or only a true Platform Admin — before this ticket
-can close it out.**
+**Resolution on #1/#2 (owner decision, 2026-09-15): fix the access-control
+gap for real, don't preserve it.** `PublicAuthMiddleware` currently fakes
+`role: 'SUPERADMIN'` for *every* authenticated public-API caller, so
+`SuperAdminGuard`'s org-scoped check always passes regardless of who's
+calling — the impersonation-search endpoint is not actually restricted to
+platform admins today. Repointing the guard to check `OWNER` instead would
+preserve that same always-passes hole under a new name. Instead:
+
+- **OAuth-token (`pos_...`) callers:** these do have a real user behind
+  them (`OAuthAuthorization.userId` — confirmed via schema). Add
+  `include: { user: { select: { id: true, isSuperAdmin: true } } }` to
+  `OAuthRepository#findByAccessToken` (it doesn't currently load this
+  relation), have `PublicAuthMiddleware` attach it to the request, and
+  gate `GET /public-api/v1/integrations/users` on that real
+  `user.isSuperAdmin` — not on anything org-scoped.
+- **Plain org-`apiKey` callers:** no user identity exists in this auth
+  mode at all — there is structurally nothing to check. Reject these
+  outright (403) on this one route.
+- **Delete** `SuperAdminGuard`, `hasSuperAdminUser`, `getSuperAdminUser`
+  (dead code once this lands — #1). New guard name/shape (e.g.
+  `PlatformAdminGuard` reading the request-attached real user) is
+  auth-rbac's implementation call.
+- **Accepted consequence, explicitly signed off by the owner:** any
+  existing caller reaching this endpoint via a plain org API key, or via
+  an OAuth token belonging to a non-`isSuperAdmin` user, will start
+  getting 403s. That's the fix working as intended, not a regression to
+  work around.
 **Depends on:** DB-01, DB-04.
 
 ### RBAC-05 — Account removal (suspend + soft-delete) + content reassignment
@@ -320,6 +336,50 @@ above.
 
 ---
 
+## Infrastructure tickets (database + devops + ui-ux)
+
+Resolves the previously-open question against `docs/ui-vision.md` §2:
+"Infrastructure Health: Real-time monitoring metrics for internal server
+health and database status." **Checked carefully, not assumed:** UI-07
+only extends `admin-stats.component.tsx` (historical app-usage/activity
+graphs — the vision's separate "Usage Graphs" bullet, already covered) and
+`admin-errors.component.tsx` (application-level errors surfaced by
+Postiz's own error tracking, not infra state). Neither touches server
+process health, container status, or database connection/queue health.
+**This is a genuine gap, not covered by anything already ticketed** —
+it needs its own tickets, and pulls in devops (not otherwise part of this
+backlog) since host/container health is that stream's domain.
+
+### INFRA-01 — Infrastructure health metrics endpoint
+New backend endpoint (Platform Admin only — this is inherently platform-
+wide, not workspace-scoped, so it belongs behind `user.isSuperAdmin`, and
+per CHARTER.md's "no published host ports" / segmented-network principle,
+must not be reachable from the public API surface at all — internal only).
+V1 scope, kept modest rather than building a full APM/Prometheus stack:
+- **Database:** Postgres reachability + a query-latency ping, active
+  connection count vs. pool max, whether all migrations are applied.
+- **Queues:** Redis/BullMQ reachability, per-queue depth (waiting/active/
+  failed), worker last-heartbeat.
+- **Server:** per-container uptime (backend, frontend, orchestrator/
+  worker), disk usage for the NVMe (`/srv/socialz-state`) and RAID/ZFS
+  (`zpool_media/socialz`) mounts from CHARTER.md's infra section.
+**Interpretation call, flagged rather than silently decided:** "real-time"
+is implemented here as short-interval polling (e.g. every 10–30s) from the
+frontend, not a websocket/SSE push mechanism — simpler, and sufficient for
+an admin dashboard. If genuine push/streaming is actually wanted, that's a
+materially bigger ticket and should be called out explicitly, not assumed.
+**Owned by:** devops (metrics collection is host/container-level) with
+database (the DB/queue queries) — coordinate, don't duplicate.
+
+### UI-10 — Infrastructure health dashboard tab
+New tab inside the UI-03 Platform Admin console (not per-workspace — see
+ADR-0001's scoping rule) rendering INFRA-01's metrics, polling on the same
+interval. Simple status tiles (green/amber/red) plus the raw numbers, not
+a full charting library for V1.
+**Depends on:** INFRA-01, UI-03.
+
+---
+
 ## V2 — logged as a defined future phase, not ticketed yet
 
 Per the project owner: do not scope this yet, but keep it visible so it
@@ -341,9 +401,13 @@ env vars and the CASL billing-tier layer in `permissions.service.ts` (see
 ADR-0001) — extend that existing subscription-tier gating, don't build a
 second, parallel one.
 
-## Also raised, not folded into this pass
+## Source: the owner's original UI vision
 
-The project owner was asked whether there's a separate UI idea to fold in
-now; none was raised in this session's consolidated decision. Re-ask on the
-next architect pass rather than assuming the answer is permanently no —
-recorded as open in `docs/STREAM_TRACKER.md`.
+This entire V1/V2 split traces back to a UI vision the project owner gave
+directly (relayed across several messages, never saved as its own document
+until this pass) — now captured verbatim at `docs/ui-vision.md`. Its
+"Disposition" section is the authoritative map from that vision's six
+feature areas onto V1 (this backlog) and V2 (logged, not ticketed). One
+item from it — Infrastructure Health monitoring — was still unresolved as
+of the previous pass; see the new Infrastructure tickets below for its
+resolution.
