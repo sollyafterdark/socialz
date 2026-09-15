@@ -47,20 +47,70 @@ silently dropping rows that reference retired values instead of remapping
 them.
 
 Before this file can be applied for real with `prisma migrate deploy`,
-the live database needs to be **baselined** into Prisma's migration
-history (it doesn't know this schema was reached via `db push`, not a
-prior migration):
+Prisma's migration history needs a **baseline migration** representing
+the schema that's already live (Prisma has no record of it — it was
+reached via `db push`, never a migration). `prisma migrate resolve
+--applied` on *this* PR's migration alone is not enough by itself: run
+against a database with no migration history at all, `migrate deploy`
+would still try to apply every prior migration file it finds, including
+one that doesn't exist yet for the pre-DB-01 schema. The baseline
+migration is what fills that gap. Concrete steps, run from the repo root,
+**before** merging this PR's schema.prisma change (i.e. against `main` as
+it stands today, commit `16af5a91`):
 
 ```sh
-pnpm dlx prisma@6.5.0 migrate resolve --applied 20260915120000_migrate_role_enum_to_six_roles \
+# 1. Snapshot the schema as it exists on `main` right now (before this
+#    PR's Role enum change) into a scratch file — this represents what's
+#    already deployed and must NOT include this PR's changes.
+git show main:libraries/nestjs-libraries/src/database/prisma/schema.prisma \
+  > /tmp/pre-db01-schema.prisma
+
+# 2. Create the baseline migration folder (timestamp must sort BEFORE
+#    20260915120000_migrate_role_enum_to_six_roles).
+mkdir -p libraries/nestjs-libraries/src/database/prisma/migrations/20260915000000_baseline
+
+# 3. Generate the baseline migration.sql: the full DDL to go from an empty
+#    database to the schema already live in production.
+pnpm dlx prisma@6.5.0 migrate diff \
+  --from-empty \
+  --to-schema-datamodel /tmp/pre-db01-schema.prisma \
+  --script \
+  > libraries/nestjs-libraries/src/database/prisma/migrations/20260915000000_baseline/migration.sql
+
+# 4. Mark the baseline as already applied against the LIVE database,
+#    WITHOUT running its SQL (the schema it describes is already there —
+#    running it would try to re-create every table and fail):
+DATABASE_URL="<production DATABASE_URL>" pnpm dlx prisma@6.5.0 migrate resolve \
+  --applied 20260915000000_baseline \
+  --schema ./libraries/nestjs-libraries/src/database/prisma/schema.prisma
+
+# 5. Confirm Prisma now sees the baseline as applied and THIS PR's
+#    migration (20260915120000_migrate_role_enum_to_six_roles) as the
+#    single next pending migration — nothing else:
+DATABASE_URL="<production DATABASE_URL>" pnpm dlx prisma@6.5.0 migrate status \
   --schema ./libraries/nestjs-libraries/src/database/prisma/schema.prisma
 ```
 
-run **before** the schema.prisma change in this PR is deployed, against
-the *old* schema — i.e. baselining is its own step in the cutover runbook,
-not something this PR does. Alternatively, whoever runs the cutover may
-choose to apply `migration.sql` directly with `psql` after a verified
-backup and skip adopting `prisma migrate` bookkeeping for now — that's a
+Steps 1–5 are one-time, run once against the live database, independent
+of this PR's own schema.prisma change (they baseline what's *already*
+there). Only after that, with this PR's schema.prisma merged, a verified
+backup taken, the maintenance window scheduled, and owner/PM sign-off on
+the pre-migration report below, does the actual cutover run:
+
+```sh
+DATABASE_URL="<production DATABASE_URL>" pnpm dlx prisma@6.5.0 migrate deploy \
+  --schema ./libraries/nestjs-libraries/src/database/prisma/schema.prisma
+```
+
+`migrate deploy` applies pending migrations in filename-timestamp order
+inside a single transaction per file, so it will run exactly
+`20260915120000_migrate_role_enum_to_six_roles/migration.sql` — the file
+reviewed in this PR — and nothing else.
+
+Alternatively, whoever runs the cutover may choose to apply
+`migration.sql` directly with `psql` after a verified backup and skip
+adopting `prisma migrate` bookkeeping for now, accepting that the next
+schema change will face this same baselining step again. That's a
 deliberate operational choice for the owner/PM sign-off conversation, not
 decided here.
 
