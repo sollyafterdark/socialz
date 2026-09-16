@@ -81,6 +81,18 @@ services:
     volumes:
       - /srv/socialz-state/config:/config
       - /zpool_media/socialz:/uploads
+    healthcheck:
+      # Visibility only — nothing auto-restarts on unhealthy yet (no
+      # autoheal sidecar, no docker.sock mount). Backend listens on
+      # :3000 internally (nginx on :5000 proxies /api to it); a bare TCP
+      # connect is enough to catch the exact 2026-09-15/16 failure mode,
+      # where the port never opens at all. wget/curl/nc are not in this
+      # image (verified), hence the node one-liner.
+      test: ["CMD", "node", "-e", "require('net').createConnection({host:'127.0.0.1',port:3000},()=>process.exit(0)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
 
   postgres:
     image: postgres:17-alpine
