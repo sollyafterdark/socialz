@@ -5,6 +5,11 @@
 #   - edge / egress: carry the Caddy<->cloudflared path in and cloudflared's
 #     outbound connection to Cloudflare out. No ports are published on any
 #     service — the tunnel is the only way in.
+#   - app-egress: NOT internal. The only outbound-internet path for the app
+#     container itself, needed to reach social platform APIs, OAuth
+#     endpoints, and outbound email. Only `app` is attached to it — never
+#     cloudflared's `egress` network, and never postgres/redis/temporal,
+#     which all stay internal-only with no route to the internet.
 #   - All state lives on the dedicated /srv/socialz-state LV (Postgres,
 #     Redis, Temporal's Postgres, Elasticsearch, app config) or the
 #     zpool_media/socialz ZFS dataset (uploaded media). No named Docker
@@ -21,6 +26,7 @@ networks:
     internal: true
   edge: {}
   egress: {}
+  app-egress: {}
 
 secrets:
   postgres_password:
@@ -43,7 +49,7 @@ services:
         NEXT_PUBLIC_VERSION: v2.23.0-141-gb38c43fa
     container_name: socialz-app
     restart: unless-stopped
-    networks: [app, data]
+    networks: [app, data, app-egress]
     depends_on:
       postgres:
         condition: service_healthy
