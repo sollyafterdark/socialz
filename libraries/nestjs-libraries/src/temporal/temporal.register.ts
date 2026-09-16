@@ -6,25 +6,32 @@ import { Connection } from '@temporalio/client';
 export class TemporalRegister implements OnModuleInit {
   constructor(private _client: TemporalService) {}
 
-  // Root cause of the 2026-09-15/16 backend boot hangs: this used to
-  // await connection.operatorService.listSearchAttributes(...) directly,
-  // with no deadline. It runs during Nest's provider-construction phase,
-  // so a slow-to-respond Temporal (e.g. mid-restart, its WorkflowService
-  // already SERVING per the healthcheck but OperatorService not yet)
-  // blocked the entire backend boot indefinitely. Both calls are now
-  // wrapped with an explicit 10s deadline and log-and-continue on
-  // timeout — registering these search attributes is idempotent
-  // maintenance, not something worth blocking the app from serving on.
+  // This used to await connection.operatorService.listSearchAttributes(...)
+  // directly, with no deadline at all — a real, verified bug regardless
+  // of whether it's the cause of the 2026-09-15/16 boot hangs. It is NOT
+  // confirmed as that root cause: onModuleInit hooks run only after
+  // Nest's provider-construction phase has fully completed for the
+  // whole application, not during it, and the hang evidence (pm2 logs
+  // showing nothing at all after the shell's own start-command echo —
+  // not even Nest's first log line) doesn't establish that construction
+  // ever finished. The actual hang could be in module loading, in
+  // pre-Nest process startup, or in nestjs-temporal-core's
+  // TEMPORAL_CONNECTION provider factory (a construction-phase, not
+  // onModuleInit, async call — see the backlog note in this PR). Fixing
+  // this regardless: registering these search attributes is idempotent
+  // maintenance, not something worth blocking the app from serving on
+  // even in the case where this specific call turns out to be slow.
   private withDeadline<T>(promise: Promise<T>, label: string, ms = 10000): Promise<T | undefined> {
-    return Promise.race([
-      promise,
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
-      ),
-    ]).catch((err) => {
-      console.error(`[startup] TemporalRegister.onModuleInit: ${err.message} — continuing without ${label}`);
-      return undefined;
+    let timeoutHandle: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
     });
+    return Promise.race([promise, timeout])
+      .finally(() => clearTimeout(timeoutHandle))
+      .catch((err) => {
+        console.error(`[startup] TemporalRegister.onModuleInit: ${err.message} — continuing without ${label}`);
+        return undefined;
+      });
   }
 
   async onModuleInit(): Promise<void> {
