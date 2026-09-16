@@ -12,9 +12,7 @@
 #   - Secrets are files under /etc/socialz/secrets/, mounted read-only via
 #     Compose `secrets:`, never plaintext environment values.
 #
-# Project name resolves to "socialz" by default from this directory's name;
-# pin it explicitly with a local (gitignored) .env containing
-# COMPOSE_PROJECT_NAME=socialz if deploying from a differently-named path.
+name: socialz
 
 networks:
   app:
