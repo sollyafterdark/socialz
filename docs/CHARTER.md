@@ -37,13 +37,34 @@ Architect/Backlog, Postiz-Core/Integrations, Database, Auth/RBAC, i18n & Transla
 
 ## 4. CI/CD
 
-GitHub-hosted runner for PR-time lint/build/automated review. Self-hosted runner on soltech for deploy-on-merge: pull → build → up -d → migrate → health check → rollback on failure.
+GitHub-hosted runner for PR-time lint/build (`.github/workflows/build.yml`
+runs `pnpm install`/`pnpm run build` on push/PR/merge_group).
+
+**No automated deploy-on-merge exists.** Corrected 2026-09-16 — this
+section previously described a self-hosted runner on soltech doing
+pull → build → up -d → migrate → health check → rollback, which did not
+reflect reality. Actual process: deploys are manual, from
+`/home/steve/socialz` — the dedicated, deploy-only checkout pinned to
+`main` (no other stream works from that path; see DEVOPS-02 in
+`docs/backlog/2026-09-admin-rbac-v1.md`) — run by a human after a
+reviewed PR merge, with a `pg_dump` backup taken first, then pulling and
+bringing the stack up by hand. Automating this is future scope, not
+current process.
 
 ---
 
 ## 5. Email
 
 `suportsocialz@mpsolara.com` — Cloudflare Email Routing handles inbound forwarding only. Outbound "send as" requires a transactional provider (SPF/DKIM/DMARC on `mpsolara.com`) configured separately.
+
+---
+
+## 6. Brand & Legal
+
+Decided by the project owner, 2026-09-15/16:
+- **Brand name:** Socialz.
+- **Legal entity name:** MP Solara.
+- **Public registration:** stays open (not invite-only).
 
 ## 7. V2 Scope: Token & Coupon System (deferred, not yet ticketed)
 
