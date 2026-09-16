@@ -6,9 +6,10 @@ import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 import { useVariables } from '@gitroom/react/helpers/variable.context';
 import { setCookie } from '@gitroom/frontend/components/layout/layout.context';
 import { useT } from '@gitroom/react/translation/get.transation.service.client';
+import { BRAND_NAME } from '@gitroom/helpers/utils/branding';
 export const LogoutComponent: FC<{ isIcon?: boolean }> = ({ isIcon }) => {
   const fetch = useFetch();
-  const { isGeneral, isSecured } = useVariables();
+  const { isSecured } = useVariables();
   const t = useT();
 
   const logout = useCallback(async () => {
@@ -44,7 +45,7 @@ export const LogoutComponent: FC<{ isIcon?: boolean }> = ({ isIcon }) => {
             data-tooltip-id="tooltip"
             data-tooltip-content={`
             ${t('logout_from', 'Logout from')}${' '}
-            ${isGeneral ? ' Postiz' : ' Gitroom'}
+            ${' ' + BRAND_NAME}
             `}
           >
             <path
@@ -55,7 +56,7 @@ export const LogoutComponent: FC<{ isIcon?: boolean }> = ({ isIcon }) => {
         ) : (
           <span className="text-red-400">
             {t('logout_from', 'Logout from')}
-            {isGeneral ? ' Postiz' : ' Gitroom'}
+            {' ' + BRAND_NAME}
           </span>
         )}
       </div>

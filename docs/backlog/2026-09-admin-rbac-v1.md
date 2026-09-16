@@ -450,6 +450,20 @@ a full charting library for V1.
 
 ---
 
+### OPS-PRICING-COPY — Billing screens still advertise Postiz's pricing terms
+UI-09 removed Postiz's brand name, logo, and false user-count/testimonial
+claims from the billing screens, but the trial/pricing terms shown there
+(`apps/frontend/src/components/new-layout/billing.after.tsx` and
+`apps/frontend/src/components/billing/first.billing.component.tsx`) are
+still Postiz's own commercial terms, e.g. "100% No-Risk Free Trial", "Pay
+NOTHING for the first 7-days", "Cancel anytime, from settings". These are
+plausible-sounding but unverified for Socialz — the owner must confirm
+Socialz's actual trial length, refund/cancellation policy, and pricing
+before these screens are shown to real clients.
+**No dependencies — but blocks enabling billing for external clients.**
+
+---
+
 ## Unassigned ops tickets (found during PR #5 review, 2026-09-16)
 
 No stream owner assigned yet — flagged for the PM to route. One paragraph

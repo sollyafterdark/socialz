@@ -1,9 +1,9 @@
 import { SettingsPopup } from '@gitroom/frontend/components/layout/settings.component';
 export const dynamic = 'force-dynamic';
 import { Metadata } from 'next';
-import { isGeneralServerSide } from '@gitroom/helpers/utils/is.general.server.side';
+import { BRAND_NAME } from '@gitroom/helpers/utils/branding';
 export const metadata: Metadata = {
-  title: `${isGeneralServerSide() ? 'Postiz' : 'Gitroom'} Settings`,
+  title: `${BRAND_NAME} Settings`,
   description: '',
 };
 export default async function Index(props: {

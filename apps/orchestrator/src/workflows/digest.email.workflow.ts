@@ -7,6 +7,7 @@ import {
 } from '@temporalio/workflow';
 import { Email, emailSignal } from '@gitroom/orchestrator/signals/email.signal';
 import { EmailActivity } from '@gitroom/orchestrator/activities/email.activity';
+import { BRAND_NAME } from '@gitroom/helpers/utils/branding';
 
 const { getUserOrgs, sendEmailAsync } = proxyActivities<EmailActivity>({
   startToCloseTimeout: '10 minute',
@@ -57,7 +58,7 @@ export async function digestEmailWorkflow({
         user.user.email,
         toSend.length === 1
           ? toSend[0].title
-          : `[Postiz] Your latest notifications`,
+          : `[${BRAND_NAME}] Your latest notifications`,
         toSend.map((p) => p.message).join('<br/>'),
         'bottom'
       );
