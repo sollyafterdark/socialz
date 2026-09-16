@@ -112,7 +112,7 @@ services:
       retries: 3
 
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2.11.4-alpine
     container_name: socialz-caddy
     restart: unless-stopped
     networks: [edge, app]
@@ -121,7 +121,7 @@ services:
     depends_on: [app]
 
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    image: cloudflare/cloudflared:2026.9.1
     container_name: socialz-cloudflared
     restart: unless-stopped
     networks: [egress, edge]
