@@ -37,6 +37,55 @@ brief's "verify before ticketing as new work" instruction:
 
 ---
 
+## DevOps tickets (deploy safety — read this before DB-01)
+
+Both found during `/code-review ultra` on PR #4 (DB-01). Both block DB-01
+being merged/deployed, not the other way around — see each ticket and
+ADR-0004.
+
+### DEVOPS-01 — Baseline migrations, replace boot-time `db push` with `migrate deploy`
+Implements ADR-0004. This repo has never had a `migrations/` directory —
+boot has only ever run `prisma db push --accept-data-loss`, which
+reconciles the live DB straight to `schema.prisma` with no data remap.
+DB-01's `migration.sql` is the first real migration this project has
+needed, and `db push` doesn't read `migrations/` at all — left as-is, the
+next image rebuild+redeploy containing DB-01's schema change crash-loops
+the container the moment it hits a row still holding `SUPERADMIN`/`USER`
+(removed from the enum), because `--accept-data-loss` doesn't rescue an
+enum-cast failure.
+Full runbook is now in ADR-0004 (amended 2026-09-16 per PM review): take a
+`pg_dump` backup first, generate the baseline with `prisma migrate diff
+--from-empty --to-schema-datamodel` (prisma@6.5.0), verify **zero drift**
+against actual production with `prisma migrate diff --from-url <prod>
+--to-schema-datamodel <schema> --exit-code` *before* `migrate resolve
+--applied` (years of boot-time `db push` may have left drift `schema.prisma`
+doesn't capture), then swap `pm2-run`'s `prisma-db-push` step for `prisma
+migrate deploy`. ADR-0004 also specifies the boot-failure recovery path if
+`migrate deploy` ever fails at container start.
+**Depends on:** Nothing outstanding — PR #1 merged 2026-09-16 and kept
+`Dockerfile.dev`/`pm2-run` unchanged (confirmed by diff), so this ticket
+is unblocked and can be picked up now.
+**Blocks:** DB-01 (must not merge/deploy DB-01's migration until boot can
+actually run it via `migrate deploy` instead of bypassing it via
+`db push`).
+
+### DEVOPS-02 — Dedicated, pinned production deploy checkout — **Done**
+**Status, 2026-09-16 — resolved, not just proposed.** The incident this
+ticket was written for (the live stack's config path holding upstream's
+compose file because a feature branch was checked out there) is resolved.
+`name: socialz` shipped explicitly in the compose file via PR #7 (merged).
+`/home/steve/socialz` is now the dedicated deploy-only checkout, pinned to
+`main` — no stream works there anymore (the database stream and this
+Architect stream both moved to their own worktrees). Deploys are manual:
+from that folder, after a reviewed PR merge, with a `pg_dump` backup taken
+first. There is no CI/CD deploy. The operational rule is now written into
+`docs/CHARTER.md` §4, which previously described a self-hosted-runner
+deploy-on-merge pipeline that did not reflect reality — corrected in the
+same pass. Nothing left open on this ticket.
+**Depends on:** Nothing — PR #1 and PR #7 both merged.
+
+---
+
 ## Database tickets
 
 ### DB-01 — Migrate `Role` enum to the six-role workspace model
@@ -66,6 +115,10 @@ just the rule-1 cases. Also still needed, as before: rows currently
 additionally get `User.isSuperAdmin = true` (Platform Admin) — that
 decision stays manual, ADR-0001 does not automate it. Include a rollback
 plan.
+**Blocked on:** DEVOPS-01 (per ADR-0004 — do not merge/deploy this
+migration until boot runs `prisma migrate deploy` instead of `db push`;
+merging DB-01 first reintroduces the crash-loop hazard DEVOPS-01 exists to
+prevent).
 **Blocks:** RBAC-01 through RBAC-08.
 
 ### DB-02 — Contributor approval state on `Post`
@@ -209,7 +262,8 @@ value:
 | 16 | `organization.selector.tsx:82,94` | Org-switcher dropdown display label | `role === 'OWNER'`, label "Owner" |
 | 17 | `user.context.tsx:15,28` | Frontend `User`/role TS type definitions | Full six-role union |
 | 18 | `top.menu.tsx:191,250,273,303` | Nav-item visibility (media agent, affiliate link, billing, settings) per role array | Replace `'SUPERADMIN'` with `'OWNER'` in each array — **and revisit whether `EDITOR`/`CONTRIBUTOR`/`TRANSLATOR`/`VIEWER` should also see each item; don't just find-and-replace the string.** Cross-check against UI-01/UI-02. |
-| 19 | `teams.component.tsx:115,122` | Team-management "can I act on this member" level comparison, currently a 3-level scale (`USER`<`ADMIN`<`SUPERADMIN`) | Needs a real 6-level hierarchy, not a rename — this is UI-02's scope already; flag the coupling here so it isn't built twice |
+| 19 | `teams.component.tsx:113,115-116,122,183` | Team-management "can I act on this member" level comparison (`myLevel`/`getLevel`, :113/:115-116), the type it's typed against (:122), and a role display-label fallback (:183: `p.role === 'USER' ? … : p.role === 'ADMIN' ? … : t('super_admin', 'Super Admin')`) — all a 3-bucket scale (`USER`<`ADMIN`<everything else) | Needs a real 6-level hierarchy, not a rename — this is UI-02's scope already; flag the coupling here so it isn't built twice. Same defect as #20 below (identical bug shape to `organization.service.ts:175-176` — build one canonical hierarchy, don't duplicate it frontend/backend). :183 is a display bug specifically: post-migration it would label `OWNER`, `EDITOR`, `CONTRIBUTOR`, `TRANSLATOR`, and `VIEWER` all as "Super Admin." (Corrected from the prior pass, which cited only :115,122 and missed the actual buggy :113 line and the :183 display bug — found by the full `SUPERADMIN\|USER` sweep, 2026-09-15.) |
+| 20 | `organization.service.ts:175-176` (`deleteTeamMember`) | The backend's own "can I remove this member" level-gate: `myLevel = myRole === 'USER' ? 0 : myRole === 'ADMIN' ? 1 : 2` (same shape for `userLevel`); only throws if `myLevel < userLevel` | **Real bug — found by `/code-review ultra` on PR #4, not a rename.** **Primary authorization rules first (PM-specified, 2026-09-16) — the level check below is a secondary guard sitting behind these, not the primary mechanism:** only `OWNER` or `ADMIN` may remove a member at all; only an `OWNER` may remove or demote another `OWNER`; the last remaining `OWNER` in a workspace can never be removed (ADR-0001's core invariant); a user removing *themself* goes through this identical last-`OWNER` rule, not a separate self-removal path. Implement those checks explicitly, don't rely on the level map alone to encode them. **Then, the level-map defect itself:** post-migration, `OWNER`, `EDITOR`, `CONTRIBUTOR`, `TRANSLATOR`, and `VIEWER` all fall into the `: 2` branch together (none of them literally equals `'USER'` or `'ADMIN'`), so the guard never fires between any two of those five — concretely, a `VIEWER` could remove an `OWNER` from the workspace if only the level check existed. Needs a full 6-value map, not a 3-branch ternary. **Correct ordering:** `OWNER=5, ADMIN=4, EDITOR=3, CONTRIBUTOR=2, TRANSLATOR=1, VIEWER=0` — matches the order the roles were given in the owner's original consolidated decision, and as a strict total order (no two roles share a level) it makes `myLevel < userLevel` alone sufficient to block a lower role from acting on a higher one, `OWNER` included (`ADMIN`'s 4 `< OWNER`'s 5 already throws — no separate special-case guard needed, though the primary rules above must still be enforced explicitly, not left implicit in the level ordering). Same defect, same fix, exists in `teams.component.tsx` (#19) — build one canonical role-hierarchy constant/helper and have both call it, rather than two independently-maintained copies of the same ranking drifting apart. |
 
 **Resolution on #1/#2 (owner decision, 2026-09-15): fix the access-control
 gap for real, don't preserve it.** `PublicAuthMiddleware` currently fakes
@@ -270,6 +324,22 @@ itself an admin action worth recording).
 obvious constraint that only an `OWNER` can grant `OWNER`. This extends the
 existing, already-working invite flow (see "verified adopt-as-is" above) —
 do not rebuild invite-by-email itself.
+
+**Additional sites found by the full `SUPERADMIN|USER` string-literal
+sweep (2026-09-15, run for RBAC-04) that this ticket's original scope
+missed** — same "only USER/ADMIN" limitation, not previously named here:
+- `auth.service.ts:40` (`routeAuth`'s `addToOrg` param type) and `:128`
+  (`getOrgFromCookie`'s decoded-JWT return type) — the invite-*acceptance*
+  side of the same flow (decoding the signed invite link), not just the
+  DTOs on the invite-*sending* side.
+- `organization.repository.ts:302` and `organization.service.ts:45,152`
+  (`addUserToOrg`'s role param, `addTeamMemberByEmail`'s `body.role as`
+  cast) — the repository/service layer the DTOs above ultimately call
+  into.
+- `teams.component.tsx:24` (`roles` array feeding the invite form's
+  `<Select>`) and `impersonate.tsx:769` (a second, separate "add team
+  member" form with its own hardcoded `<option value="USER">`/`"ADMIN"`
+  pair) — two independent frontend role-pickers, not one.
 **Depends on:** DB-01.
 
 ---
@@ -377,6 +447,56 @@ ADR-0001's scoping rule) rendering INFRA-01's metrics, polling on the same
 interval. Simple status tiles (green/amber/red) plus the raw numbers, not
 a full charting library for V1.
 **Depends on:** INFRA-01, UI-03.
+
+---
+
+## Unassigned ops tickets (found during PR #5 review, 2026-09-16)
+
+No stream owner assigned yet — flagged for the PM to route. One paragraph
+each, not fully specced.
+
+### OPS-EMAIL — Configure outbound email
+Backend logs show "Email sender information not found" — outbound email
+(invite links, notifications) isn't configured. CHARTER.md §5 already
+scopes the domain piece (`suportsocialz@mpsolara.com`, Cloudflare Email
+Routing handles inbound only) but a transactional outbound provider
+(SPF/DKIM/DMARC on `mpsolara.com`) was left as a to-decide. Owner needs to
+choose a provider before this can be configured; blocks anything relying
+on email, invite-by-email (RBAC-08's existing flow) included.
+
+### OPS-BACKUP — Automated nightly Postgres backups, stored off-NVMe, with a restore test
+Set up automated nightly `pg_dump` backups of the main Postgres (and
+`temporal-postgresql`) stored off the NVMe (`/srv/socialz-state`) itself —
+a backup living on the same disk as the data it protects doesn't survive
+that disk failing. Include a periodic *restore* test, not just confirming
+the dump file exists, so a backup that silently can't be restored isn't
+discovered during an actual incident. Also a direct prerequisite of
+ADR-0004/DEVOPS-01's baseline runbook, which assumes a `pg_dump` backup
+step exists — nothing currently automates it.
+
+### OPS-TEMPORAL-RECOVERY — App must recover if Temporal isn't ready after a host reboot
+PR #7's Temporal healthcheck fix (`777a171e`) closes the boot race during
+`docker compose up` (app now waits on `condition: service_healthy`), but
+`depends_on` ordering only applies when Compose itself orchestrates
+startup. On a host reboot, Docker's `restart: unless-stopped` policy
+restarts each container independently — not via `compose up` — so that
+ordering guarantee doesn't apply. Confirmed: no retry/reconnect logic
+exists in the Temporal client code today
+(`libraries/nestjs-libraries/src/temporal/`). If Temporal takes longer
+than the app to become ready after a reboot, the app can come up
+disconnected with no path back to working short of a manual `docker
+compose restart` — it needs its own Temporal connection to retry with
+backoff instead of failing once and staying dead.
+
+### OPS-SECRETS — Move `temporal-postgresql`'s plaintext password to a secrets file
+`temporal-postgresql` (`POSTGRES_PASSWORD: temporal`) and the `temporal`
+service's `POSTGRES_PWD=temporal` env var currently hardcode the literal
+password `temporal` directly in `docker-compose.yaml` — readable by
+anything that can read the compose file or the process environment. The
+main app's own Postgres, one service away in the same file, already uses
+the correct pattern (`POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password`)
+— replicate that existing pattern for `temporal-postgresql`/`temporal`
+rather than inventing a new one.
 
 ---
 
