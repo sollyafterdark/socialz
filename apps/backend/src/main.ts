@@ -21,6 +21,7 @@ import { ConfigurationChecker } from '@gitroom/helpers/configuration/configurati
 import { startMcp } from '@gitroom/nestjs-libraries/chat/start.mcp';
 
 async function start() {
+  console.log(`[startup] ${Date.now()} before NestFactory.create`);
   const app = await NestFactory.create(AppModule, {
     rawBody: true,
     cors: {
@@ -47,6 +48,7 @@ async function start() {
       ],
     },
   });
+  console.log(`[startup] ${Date.now()} after NestFactory.create`);
 
   await startMcp(app);
 
@@ -72,6 +74,7 @@ async function start() {
 
   try {
     await app.listen(port);
+    (global as any).__clearStartupWatchdog?.();
     console.log('Backend started successfully on port ' + port);
 
     checkConfiguration(); // Do this last, so that users will see obvious issues at the end of the startup log without having to scroll up.
