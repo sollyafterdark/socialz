@@ -5,6 +5,11 @@
 #   - edge / egress: carry the Caddy<->cloudflared path in and cloudflared's
 #     outbound connection to Cloudflare out. No ports are published on any
 #     service — the tunnel is the only way in.
+#   - app-egress: NOT internal. The only outbound-internet path for the app
+#     container itself, needed to reach social platform APIs, OAuth
+#     endpoints, and outbound email. Only `app` is attached to it — never
+#     cloudflared's `egress` network, and never postgres/redis/temporal,
+#     which all stay internal-only with no route to the internet.
 #   - All state lives on the dedicated /srv/socialz-state LV (Postgres,
 #     Redis, Temporal's Postgres, Elasticsearch, app config) or the
 #     zpool_media/socialz ZFS dataset (uploaded media). No named Docker
@@ -12,9 +17,7 @@
 #   - Secrets are files under /etc/socialz/secrets/, mounted read-only via
 #     Compose `secrets:`, never plaintext environment values.
 #
-# Project name resolves to "socialz" by default from this directory's name;
-# pin it explicitly with a local (gitignored) .env containing
-# COMPOSE_PROJECT_NAME=socialz if deploying from a differently-named path.
+name: socialz
 
 networks:
   app:
@@ -23,6 +26,7 @@ networks:
     internal: true
   edge: {}
   egress: {}
+  app-egress: {}
 
 secrets:
   postgres_password:
@@ -45,14 +49,14 @@ services:
         NEXT_PUBLIC_VERSION: v2.23.0-141-gb38c43fa
     container_name: socialz-app
     restart: unless-stopped
-    networks: [app, data]
+    networks: [app, data, app-egress]
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
       temporal:
-        condition: service_started
+        condition: service_healthy
     secrets: [database_url, redis_password, jwt_secret]
     environment:
       MAIN_URL: 'https://socialz.mpsolara.com'
@@ -112,7 +116,7 @@ services:
       retries: 3
 
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2.11.4-alpine
     container_name: socialz-caddy
     restart: unless-stopped
     networks: [edge, app]
@@ -121,7 +125,7 @@ services:
     depends_on: [app]
 
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    image: cloudflare/cloudflared:2026.9.1
     container_name: socialz-cloudflared
     restart: unless-stopped
     networks: [egress, edge]
@@ -194,6 +198,20 @@ services:
           cpus: '0.5'
     volumes:
       - ./dynamicconfig:/etc/temporal/config/dynamicconfig
+    healthcheck:
+      # tctl ships in this image (verified: /usr/local/bin/tctl in
+      # temporalio/auto-setup:1.28.1) and `cluster health` calls the
+      # frontend service's real gRPC health-checking endpoint, so it
+      # confirms Temporal is actually SERVING — not just that port 7233
+      # is open. A bare TCP probe would pass the instant the port starts
+      # listening, before the frontend service inside is ready, which is
+      # exactly the boot-race this healthcheck exists to close (see
+      # ticket #10 / docs/STREAM_TRACKER.md row 10).
+      test: ['CMD', 'tctl', '--address', 'temporal:7233', 'cluster', 'health']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   temporal-ui:
     container_name: socialz-temporal-ui
