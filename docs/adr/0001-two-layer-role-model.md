@@ -141,3 +141,28 @@ instead.
   public-API endpoint: some callers that were incidentally relying on it
   being unrestricted will start being rejected. Accepted by the project
   owner as the correct outcome, not deferred to avoid breaking them.
+
+## Amendment (2026-09-15, owner-approved)
+
+Found by `/code-review ultra` on PR #4 (DB-01): the fallback owner
+promotion described above (Rules 2 and 3 — no pre-existing `SUPERADMIN` in
+a workspace) as originally written picks the workspace's earliest-created
+candidate without checking whether that candidate can actually use the
+account. A candidate can be `UserOrganization.disabled = true` (e.g. after
+a subscription downgrade disabled every non-`SUPERADMIN` member) or belong
+to a `User` with `deletedAt` set or `activated = false` — promoting that
+row to `OWNER` would technically satisfy "every workspace has an owner"
+while leaving the workspace with an owner nobody can actually use.
+
+**Amended rule:** Rules 2 and 3's candidate selection now prefers the
+earliest-created row that is *healthy* — `UserOrganization.disabled =
+false` **and** `User.deletedAt IS NULL` **and** `User.activated = true` —
+and only falls back to an unhealthy candidate if no healthy one exists in
+that workspace. Rule 1 (workspace already has a `SUPERADMIN`) is
+unaffected and stays purely mechanical — this amendment only changes how
+Rules 2/3 rank *candidates*, not whether a workspace needs a fallback at
+all.
+
+This amendment does not change the original decision text above — it
+narrows the candidate-selection criteria within the fallback this ADR
+already specifies.
