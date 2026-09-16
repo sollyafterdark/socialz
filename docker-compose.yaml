@@ -1,185 +1,145 @@
+# socialz production stack — isolated from the host's other Docker projects.
+#
+# Segmentation model:
+#   - app / data networks: internal:true, no route to the internet.
+#   - edge / egress: carry the Caddy<->cloudflared path in and cloudflared's
+#     outbound connection to Cloudflare out. No ports are published on any
+#     service — the tunnel is the only way in.
+#   - app-egress: NOT internal. The only outbound-internet path for the app
+#     container itself, needed to reach social platform APIs, OAuth
+#     endpoints, and outbound email. Only `app` is attached to it — never
+#     cloudflared's `egress` network, and never postgres/redis/temporal,
+#     which all stay internal-only with no route to the internet.
+#   - All state lives on the dedicated /srv/socialz-state LV (Postgres,
+#     Redis, Temporal's Postgres, Elasticsearch, app config) or the
+#     zpool_media/socialz ZFS dataset (uploaded media). No named Docker
+#     volumes.
+#   - Secrets are files under /etc/socialz/secrets/, mounted read-only via
+#     Compose `secrets:`, never plaintext environment values.
+#
+name: socialz
+
+networks:
+  app:
+    internal: true
+  data:
+    internal: true
+  edge: {}
+  egress: {}
+  app-egress: {}
+
+secrets:
+  postgres_password:
+    file: /etc/socialz/secrets/postgres_password
+  redis_password:
+    file: /etc/socialz/secrets/redis_password
+  jwt_secret:
+    file: /etc/socialz/secrets/jwt_secret
+  database_url:
+    file: /etc/socialz/secrets/database_url
+  cloudflare_tunnel_token:
+    file: /etc/socialz/secrets/cloudflare_tunnel_token
+
 services:
-  postiz:
-    image: ghcr.io/gitroomhq/postiz-app:latest
-    container_name: postiz
-    restart: always
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      args:
+        NEXT_PUBLIC_VERSION: v2.23.0-141-gb38c43fa
+    container_name: socialz-app
+    restart: unless-stopped
+    networks: [app, data, app-egress]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    secrets: [database_url, redis_password, jwt_secret]
     environment:
-      # === Required Settings
-      MAIN_URL: 'http://localhost:4007'
-      FRONTEND_URL: 'http://localhost:4007'
-      NEXT_PUBLIC_BACKEND_URL: 'http://localhost:4007/api'
-      JWT_SECRET: 'random string that is unique to every install - just type random characters here!'
-      DATABASE_URL: 'postgresql://postiz-user:postiz-password@postiz-postgres:5432/postiz-db-local'
-      REDIS_URL: 'redis://postiz-redis:6379'
+      MAIN_URL: 'https://socialz.mpsolara.com'
+      FRONTEND_URL: 'https://socialz.mpsolara.com'
+      NEXT_PUBLIC_BACKEND_URL: 'https://socialz.mpsolara.com/api'
       BACKEND_INTERNAL_URL: 'http://localhost:3000'
       TEMPORAL_ADDRESS: 'temporal:7233'
       IS_GENERAL: 'true'
       DISABLE_REGISTRATION: 'false'
-
-      # === Storage Settings
       STORAGE_PROVIDER: 'local'
       UPLOAD_DIRECTORY: '/uploads'
       NEXT_PUBLIC_UPLOAD_DIRECTORY: '/uploads'
-
-      # === Cloudflare (R2) Settings
-      # STORAGE_PROVIDER: 'cloudflare'
-      # CLOUDFLARE_ACCOUNT_ID: 'your-account-id'
-      # CLOUDFLARE_ACCESS_KEY: 'your-access-key'
-      # CLOUDFLARE_SECRET_ACCESS_KEY: 'your-secret-access-key'
-      # CLOUDFLARE_BUCKETNAME: 'your-bucket-name'
-      # CLOUDFLARE_BUCKET_URL: 'https://your-bucket-url.r2.cloudflarestorage.com/'
-      # CLOUDFLARE_REGION: 'auto'
-
-      # === Social Media API Settings
-      X_URL: ''
-      X_API_KEY: ''
-      X_API_SECRET: ''
-      LINKEDIN_CLIENT_ID: ''
-      LINKEDIN_CLIENT_SECRET: ''
-      REDDIT_CLIENT_ID: ''
-      REDDIT_CLIENT_SECRET: ''
-      GITHUB_CLIENT_ID: ''
-      GITHUB_CLIENT_SECRET: ''
-      APPLE_CLIENT_ID: ''
-      APPLE_TEAM_ID: ''
-      APPLE_KEY_ID: ''
-      APPLE_PRIVATE_KEY: ''
-      BEEHIIVE_API_KEY: ''
-      BEEHIIVE_PUBLICATION_ID: ''
-      THREADS_APP_ID: ''
-      THREADS_APP_SECRET: ''
-      FACEBOOK_APP_ID: ''
-      FACEBOOK_APP_SECRET: ''
-      YOUTUBE_CLIENT_ID: ''
-      YOUTUBE_CLIENT_SECRET: ''
-      TIKTOK_CLIENT_ID: ''
-      TIKTOK_CLIENT_SECRET: ''
-      TIKTOK_BUSINESS_CLIENT_ID: ''
-      TIKTOK_BUSINESS_CLIENT_SECRET: ''
-      PINTEREST_CLIENT_ID: ''
-      PINTEREST_CLIENT_SECRET: ''
-      DRIBBBLE_CLIENT_ID: ''
-      DRIBBBLE_CLIENT_SECRET: ''
-      TUMBLR_CLIENT_ID: ''
-      TUMBLR_CLIENT_SECRET: ''
-      DISCORD_CLIENT_ID: ''
-      DISCORD_CLIENT_SECRET: ''
-      DISCORD_BOT_TOKEN_ID: ''
-      SLACK_ID: ''
-      SLACK_SECRET: ''
-      SLACK_SIGNING_SECRET: ''
-      MASTODON_URL: 'https://mastodon.social'
-      MASTODON_CLIENT_ID: ''
-      MASTODON_CLIENT_SECRET: ''
-
-      # === OAuth & Authentik Settings
-      # NEXT_PUBLIC_POSTIZ_OAUTH_DISPLAY_NAME: 'Authentik'
-      # NEXT_PUBLIC_POSTIZ_OAUTH_LOGO_URL: 'https://raw.githubusercontent.com/walkxcode/dashboard-icons/master/png/authentik.png'
-      # POSTIZ_GENERIC_OAUTH: 'false'
-      # POSTIZ_OAUTH_URL: 'https://auth.example.com'
-      # POSTIZ_OAUTH_AUTH_URL: 'https://auth.example.com/application/o/authorize'
-      # POSTIZ_OAUTH_TOKEN_URL: 'https://auth.example.com/application/o/token'
-      # POSTIZ_OAUTH_USERINFO_URL: 'https://authentik.example.com/application/o/userinfo'
-      # POSTIZ_OAUTH_CLIENT_ID: ''
-      # POSTIZ_OAUTH_CLIENT_SECRET: ''
-      # POSTIZ_OAUTH_SCOPE: "openid profile email"  # Optional: uncomment to override default scope
-
-      # === Sentry
-
-      # NEXT_PUBLIC_SENTRY_DSN: 'http://spotlight:8969/stream'
-      # SENTRY_SPOTLIGHT: '1'
-
-      # === Misc Settings
-      OPENAI_API_KEY: ''
-      # Only this OAuth client can receive verified user email claims via OIDC.
-      OPENAI_OAUTH_CLIENT_ID: ''
-      NEXT_PUBLIC_DISCORD_SUPPORT: ''
-      NEXT_PUBLIC_POLOTNO: ''
-      API_LIMIT: 30
-
-      # === Payment / Stripe Settings
-      FEE_AMOUNT: 0.05
-      STRIPE_PUBLISHABLE_KEY: ''
-      STRIPE_SECRET_KEY: ''
-      STRIPE_SIGNING_KEY: ''
-      STRIPE_SIGNING_KEY_CONNECT: ''
-
-      # === Developer Settings
-      NX_ADD_PLUGINS: false
-
-      # === Short Link Service Settings (Optional - leave blank if unused)
-      # DUB_TOKEN: ""
-      # DUB_API_ENDPOINT: "https://api.dub.co"
-      # DUB_SHORT_LINK_DOMAIN: "dub.sh"
-      # SHORT_IO_SECRET_KEY: ""
-      # KUTT_API_KEY: ""
-      # KUTT_API_ENDPOINT: "https://kutt.it/api/v2"
-      # KUTT_SHORT_LINK_DOMAIN: "kutt.it"
-      # LINK_DRIP_API_KEY: ""
-      # LINK_DRIP_API_ENDPOINT: "https://api.linkdrip.com/v1/"
-      # LINK_DRIP_SHORT_LINK_DOMAIN: "dripl.ink"
-
+      NX_ADD_PLUGINS: 'false'
+    entrypoint:
+      - sh
+      - -c
+      - |
+        export DATABASE_URL="$$(cat /run/secrets/database_url)"
+        export REDIS_URL="redis://:$$(cat /run/secrets/redis_password)@redis:6379"
+        export JWT_SECRET="$$(cat /run/secrets/jwt_secret)"
+        exec sh -c 'nginx && pnpm run pm2'
     volumes:
-      - postiz-config:/config/
-      - postiz-uploads:/uploads/
-    ports:
-      - '4007:5000'
-    networks:
-      - postiz-network
-      - temporal-network
-    depends_on:
-      postiz-postgres:
-        condition: service_healthy
-      postiz-redis:
-        condition: service_healthy
+      - /srv/socialz-state/config:/config
+      - /zpool_media/socialz:/uploads
 
-  postiz-postgres:
+  postgres:
     image: postgres:17-alpine
-    container_name: postiz-postgres
-    restart: always
+    container_name: socialz-postgres
+    restart: unless-stopped
+    networks: [data]
     environment:
-      POSTGRES_PASSWORD: postiz-password
       POSTGRES_USER: postiz-user
-      POSTGRES_DB: postiz-db-local
+      POSTGRES_DB: postiz-db
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
     volumes:
-      - postgres-volume:/var/lib/postgresql/data
-    networks:
-      - postiz-network
+      - /srv/socialz-state/postgres:/var/lib/postgresql/data
     healthcheck:
-      test: pg_isready -U postiz-user -d postiz-db-local
+      test: ['CMD-SHELL', 'pg_isready -U postiz-user -d postiz-db']
       interval: 10s
       timeout: 3s
       retries: 3
-  postiz-redis:
-    image: redis:7.2
-    container_name: postiz-redis
-    restart: always
-    healthcheck:
-      test: redis-cli ping
-      interval: 10s
-      timeout: 3s
-      retries: 3
-    volumes:
-      - postiz-redis-data:/data
-    networks:
-      - postiz-network
 
-  # For Application Monitoring / Debugging
-  spotlight:
-    pull_policy: always
-    container_name: spotlight
-    ports:
-      - 8969:8969/tcp
-    image: ghcr.io/getsentry/spotlight:latest
-    networks:
-      - postiz-network
+  redis:
+    image: redis:7.2
+    container_name: socialz-redis
+    restart: unless-stopped
+    networks: [data]
+    secrets: [redis_password]
+    command: sh -c 'exec redis-server --requirepass "$$(cat /run/secrets/redis_password)"'
+    volumes:
+      - /srv/socialz-state/redis:/data
+    healthcheck:
+      test: ['CMD-SHELL', 'redis-cli -a "$$(cat /run/secrets/redis_password)" ping | grep -q PONG']
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  caddy:
+    image: caddy:2.11.4-alpine
+    container_name: socialz-caddy
+    restart: unless-stopped
+    networks: [edge, app]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on: [app]
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.9.1
+    container_name: socialz-cloudflared
+    restart: unless-stopped
+    networks: [egress, edge]
+    secrets: [cloudflare_tunnel_token]
+    command: ['tunnel', 'run', '--token-file', '/run/secrets/cloudflare_tunnel_token']
 
   # -----------------------
-  # Temporal Stack
+  # Temporal (required at app boot — see libraries/nestjs-libraries/src/temporal/)
   # -----------------------
   temporal-elasticsearch:
-    container_name: temporal-elasticsearch
+    container_name: socialz-temporal-elasticsearch
     image: elasticsearch:7.17.27
+    restart: unless-stopped
+    networks: [data]
     environment:
       - cluster.routing.allocation.disk.threshold_enabled=true
       - cluster.routing.allocation.disk.watermark.low=512mb
@@ -188,31 +148,35 @@ services:
       - discovery.type=single-node
       - ES_JAVA_OPTS=-Xms256m -Xmx256m
       - xpack.security.enabled=false
-    networks:
-      - temporal-network
-    expose:
-      - 9200
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: '0.5'
     volumes:
-      - /var/lib/elasticsearch/data
+      - /srv/socialz-state/elasticsearch:/usr/share/elasticsearch/data
 
   temporal-postgresql:
-    container_name: temporal-postgresql
+    container_name: socialz-temporal-postgresql
     image: postgres:16
+    restart: unless-stopped
+    networks: [data]
     environment:
       POSTGRES_PASSWORD: temporal
       POSTGRES_USER: temporal
-    networks:
-      - temporal-network
-    expose:
-      - 5432
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
     volumes:
-      - /var/lib/postgresql/data
+      - /srv/socialz-state/temporal-postgres:/var/lib/postgresql/data
 
   temporal:
-    container_name: temporal
-    ports:
-      - '7233:7233'
+    container_name: socialz-temporal
     image: temporalio/auto-setup:1.28.1
+    restart: unless-stopped
+    networks: [data]
     depends_on:
       - temporal-postgresql
       - temporal-elasticsearch
@@ -227,53 +191,39 @@ services:
       - ES_SEEDS=temporal-elasticsearch
       - ES_VERSION=v7
       - TEMPORAL_NAMESPACE=default
-    networks:
-      - temporal-network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
     volumes:
       - ./dynamicconfig:/etc/temporal/config/dynamicconfig
-    labels:
-      kompose.volume.type: configMap
-
-  temporal-admin-tools:
-    container_name: temporal-admin-tools
-    image: temporalio/admin-tools:1.28.1-tctl-1.18.4-cli-1.4.1
-    environment:
-      - TEMPORAL_ADDRESS=temporal:7233
-      - TEMPORAL_CLI_ADDRESS=temporal:7233
-    networks:
-      - temporal-network
-    stdin_open: true
-    depends_on:
-      - temporal
-    tty: true
+    healthcheck:
+      # tctl ships in this image (verified: /usr/local/bin/tctl in
+      # temporalio/auto-setup:1.28.1) and `cluster health` calls the
+      # frontend service's real gRPC health-checking endpoint, so it
+      # confirms Temporal is actually SERVING — not just that port 7233
+      # is open. A bare TCP probe would pass the instant the port starts
+      # listening, before the frontend service inside is ready, which is
+      # exactly the boot-race this healthcheck exists to close (see
+      # ticket #10 / docs/STREAM_TRACKER.md row 10).
+      test: ['CMD', 'tctl', '--address', 'temporal:7233', 'cluster', 'health']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   temporal-ui:
-    container_name: temporal-ui
+    container_name: socialz-temporal-ui
     image: temporalio/ui:2.34.0
+    restart: unless-stopped
+    networks: [data]
     environment:
       - TEMPORAL_ADDRESS=temporal:7233
-      - TEMPORAL_CORS_ORIGINS=http://127.0.0.1:3000
-    networks:
-      - temporal-network
-    ports:
-      - '8080:8080'
-
-volumes:
-  postgres-volume:
-    external: false
-
-  postiz-redis-data:
-    external: false
-
-  postiz-config:
-    external: false
-
-  postiz-uploads:
-    external: false
-
-networks:
-  postiz-network:
-    external: false
-  temporal-network:
-    driver: bridge
-    name: temporal-network
+      - TEMPORAL_CORS_ORIGINS=https://socialz.mpsolara.com
+    # No published port, by design (see project segmentation rules). Reach
+    # it for ops by SSHing to the host — which sits directly on the `data`
+    # bridge and can route to it even though the network is internal — and
+    # forwarding a local port to this container's address:
+    #   docker inspect -f '{{.NetworkSettings.Networks.socialz_data.IPAddress}}' socialz-temporal-ui
+    #   ssh -L 8080:<that-ip>:8080 <host>
