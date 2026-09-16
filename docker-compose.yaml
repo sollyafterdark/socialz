@@ -52,7 +52,7 @@ services:
       redis:
         condition: service_healthy
       temporal:
-        condition: service_started
+        condition: service_healthy
     secrets: [database_url, redis_password, jwt_secret]
     environment:
       MAIN_URL: 'https://socialz.mpsolara.com'
@@ -194,6 +194,20 @@ services:
           cpus: '0.5'
     volumes:
       - ./dynamicconfig:/etc/temporal/config/dynamicconfig
+    healthcheck:
+      # tctl ships in this image (verified: /usr/local/bin/tctl in
+      # temporalio/auto-setup:1.28.1) and `cluster health` calls the
+      # frontend service's real gRPC health-checking endpoint, so it
+      # confirms Temporal is actually SERVING — not just that port 7233
+      # is open. A bare TCP probe would pass the instant the port starts
+      # listening, before the frontend service inside is ready, which is
+      # exactly the boot-race this healthcheck exists to close (see
+      # ticket #10 / docs/STREAM_TRACKER.md row 10).
+      test: ['CMD', 'tctl', '--address', 'temporal:7233', 'cluster', 'health']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   temporal-ui:
     container_name: socialz-temporal-ui
