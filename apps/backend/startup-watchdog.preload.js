@@ -39,7 +39,45 @@ console.log(`[startup] ${Date.now()} preload loaded pid=${process.pid}`);
 
 const { Worker } = require('worker_threads');
 
-const TIMEOUT_MS = Number(process.env.BACKEND_STARTUP_TIMEOUT_MS) || 120000;
+const TIMEOUT_MS = Number(process.env.BACKEND_STARTUP_TIMEOUT_MS) || 45000;
+
+// How long before the SIGKILL deadline to request a diagnostic report via
+// SIGUSR2 (node started with --report-on-signal --report-signal=SIGUSR2 —
+// see apps/backend package.json "start"). Report generation is dispatched
+// through libuv's signal-watcher, which only runs on the main thread's
+// event loop — so is a plain setTimeout scheduling the SIGUSR2 send below.
+// Verified empirically (throwaway container, node --report-on-signal
+// against a `while(true){}` hang): sending SIGUSR2 produces NOTHING when
+// the main thread is truly frozen synchronously, in JS or in a blocking
+// native call/lock — the event loop never gets a turn to notice the
+// pending signal, so the report callback never runs. The same mechanism
+// against a healthy/responsive process does produce a report. That means
+// a main-thread setTimeout costs us nothing here: it can only fail to
+// fire in exactly the case (event loop frozen) where the report itself
+// could never have been produced anyway, and it can't miss the async-hang
+// case (event loop still turning) that's the one case this is worth
+// having. Deliberately NOT a second worker_thread: verified empirically
+// that a second worker racing the kill worker under a frozen main thread
+// gets its whole top-level script replayed from scratch, hundreds of
+// times over a real ~40s wait (an already-shared-memory idempotency guard
+// included — each replay got a clean slate, so guarding against re-firing
+// didn't work either) — a genuinely surprising Node behavior in this
+// specific "`--require`-spawned worker racing a frozen main thread"
+// scenario that we don't have a full root cause for. A single worker
+// (below) doesn't exhibit it, which is what the original PR #8 design
+// already relies on and what's kept unchanged here.
+const REPORT_LEAD_MS = 5000;
+const reportTimer = setTimeout(() => {
+  try {
+    process.kill(process.pid, 'SIGUSR2');
+    console.log(
+      `[startup-watchdog] ${TIMEOUT_MS - REPORT_LEAD_MS}ms without a successful listen() — sent SIGUSR2 for a diagnostic report`
+    );
+  } catch (e) {
+    console.log(`[startup-watchdog] SIGUSR2 send failed: ${e.message}`);
+  }
+}, Math.max(0, TIMEOUT_MS - REPORT_LEAD_MS));
+reportTimer.unref();
 
 // Shared, not a regular ArrayBuffer: both threads see writes to this
 // memory immediately, which is what Atomics.wait/notify rely on.
@@ -49,6 +87,7 @@ Atomics.store(flag, 0, 0);
 
 const worker = new Worker(
   `
+  const fs = require('fs');
   const { workerData } = require('worker_threads');
   const flag = new Int32Array(workerData.sharedBuffer);
   // Blocks THIS thread only, for up to timeoutMs, until index 0 stops
@@ -57,7 +96,19 @@ const worker = new Worker(
   // event loop entirely.
   const result = Atomics.wait(flag, 0, 0, workerData.timeoutMs);
   if (result === 'timed-out') {
-    process.stderr.write(
+    // process.stderr.write() from a worker thread is proxied to the main
+    // thread (the real fd write happens there) and blocks waiting for
+    // that round trip. Verified empirically: with the main thread frozen
+    // in a synchronous loop, process.stderr.write() from the worker never
+    // returns, so the process.kill() that used to follow it never ran —
+    // this is why "fired" never appeared in the 2026-09-16 logs, and
+    // (per the isolated repro) the SIGKILL below was reached anyway only
+    // because in production node isn't pid 1 in its own namespace, not
+    // because this write returned. fs.writeSync(2, ...) writes straight
+    // to the real fd from the worker's own thread, no main-thread
+    // cooperation needed, and returns immediately either way.
+    fs.writeSync(
+      2,
       '[startup-watchdog] fired after ' + workerData.timeoutMs +
         'ms without a successful listen() (BACKEND_STARTUP_TIMEOUT_MS=' +
         workerData.timeoutMs + 'ms) — killing pid ' + workerData.pid +
@@ -78,5 +129,13 @@ worker.unref();
 global.__clearStartupWatchdog = () => {
   Atomics.store(flag, 0, 1);
   Atomics.notify(flag, 0);
+  // Without this, a successfully-started backend would still get an
+  // unsolicited SIGUSR2 ~REPORT_LEAD_MS before whatever TIMEOUT_MS was —
+  // harmless with --report-on-signal active (just an unnecessary report on
+  // a healthy process), but SIGUSR2's default disposition is to terminate
+  // the process, so anywhere that flag isn't set (a local `pnpm run start`
+  // outside the container, say) this would silently kill an already-healthy
+  // backend. Verified: reproduced the kill, confirmed clearTimeout fixes it.
+  clearTimeout(reportTimer);
   console.log(`[startup-watchdog] cleared — backend is listening`);
 };

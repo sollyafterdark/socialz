@@ -77,6 +77,7 @@ services:
         export DATABASE_URL="$$(cat /run/secrets/database_url)"
         export REDIS_URL="redis://:$$(cat /run/secrets/redis_password)@redis:6379"
         export JWT_SECRET="$$(cat /run/secrets/jwt_secret)"
+        mkdir -p /config/node-reports
         exec sh -c 'nginx && pnpm run pm2'
     volumes:
       - /srv/socialz-state/config:/config
@@ -92,7 +93,15 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 60s
+      # Keep in sync with BACKEND_STARTUP_TIMEOUT_MS's default (45s) in
+      # apps/backend/startup-watchdog.preload.js. start_period covers the
+      # container's whole life, not each pm2 restart inside it, so a
+      # single-attempt start_period would start counting unhealthy
+      # retries against a legitimate multi-attempt boot (the 2026-09-16
+      # incident took 2 failed watchdog-timeout cycles before a 3rd
+      # attempt succeeded). Sized for 2 failed 45s attempts + a healthy
+      # ~5s boot, rounded up.
+      start_period: 120s
 
   postgres:
     image: postgres:17-alpine
