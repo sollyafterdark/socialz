@@ -488,6 +488,28 @@ discovered during an actual incident. Also a direct prerequisite of
 ADR-0004/DEVOPS-01's baseline runbook, which assumes a `pg_dump` backup
 step exists — nothing currently automates it.
 
+Built in the `devops/ops-backup` PR (`ops/`): nightly `pg_dump` of the
+main Postgres with 7 daily + 4 weekly retention, a monthly restore test
+into a throwaway container, and systemd timers. `temporal-postgresql` was
+investigated and deliberately excluded from scope — see "Why
+temporal-postgresql is excluded" in `ops/README.md` for the code-level
+reasoning (scheduled posts already rebuild from the `Post` table via the
+existing `missingPostWorkflow` reconciliation sweep, independent of
+Temporal's own database).
+
+### OPS-BACKUP-OFFSITE — Encrypted offsite copy of the nightly backups
+`OPS-BACKUP`'s nightly backups (`ops/backup-postgres.sh`) live only on
+`zpool_media/socialz-backups` — a different ZFS dataset from the NVMe the
+live data is on, but still physically the same host. That protects
+against a single-disk failure, not against the box itself being lost
+(fire, theft, host-level failure/ransomware, RAID controller failure
+taking multiple disks at once). Needs: an offsite destination, encryption
+in transit and at rest (the dump is a full logical export — same secrets-
+exposure concern already noted for `chmod 700` on the local copy, but now
+leaving the host), and a decision on provider/target before this can be
+scoped properly. Not built as part of `OPS-BACKUP` — deliberately deferred
+to its own ticket rather than scope-creeping the nightly-backup PR.
+
 ### OPS-TEMPORAL-RECOVERY — App must recover if Temporal isn't ready after a host reboot
 PR #7's Temporal healthcheck fix (`777a171e`) closes the boot race during
 `docker compose up` (app now waits on `condition: service_healthy`), but

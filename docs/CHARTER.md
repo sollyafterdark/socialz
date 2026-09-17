@@ -55,7 +55,7 @@ current process.
 
 ## 5. Email
 
-`suportsocialz@mpsolara.com` — Cloudflare Email Routing handles inbound forwarding only. Outbound "send as" requires a transactional provider (SPF/DKIM/DMARC on `mpsolara.com`) configured separately.
+`support-socialz@mpsolara.com` — Cloudflare Email Routing handles inbound forwarding only. Outbound "send as" requires a transactional provider (SPF/DKIM/DMARC on `mpsolara.com`) configured separately.
 
 ---
 

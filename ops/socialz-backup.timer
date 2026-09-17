@@ -1,0 +1,12 @@
+[Unit]
+Description=Run socialz-backup.service nightly at 03:00
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+# If the host was off/asleep at 03:00 (reboot, maintenance), run the
+# missed backup as soon as the timer is next able to, instead of silently
+# skipping a whole day.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
