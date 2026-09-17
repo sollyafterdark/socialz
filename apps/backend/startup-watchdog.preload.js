@@ -35,9 +35,35 @@
 // ignored by any JS code, so it terminates the process even if the main
 // thread never runs another line of JS again.
 
-console.log(`[startup] ${Date.now()} preload loaded pid=${process.pid}`);
+const { Worker, isMainThread } = require('worker_threads');
 
-const { Worker } = require('worker_threads');
+// Worker threads inherit process.execArgv by default — including this
+// very `--require ./startup-watchdog.preload.js` flag. Without this
+// guard, the kill-worker created below re-runs this whole file as part
+// of ITS OWN bootstrap (before its eval'd task ever executes), which
+// creates another worker, which does the same, recursively — confirmed
+// empirically: instrumented isMainThread/threadId, saw a genuine chain of
+// 100+ distinct worker threads (not a replay of one worker — every
+// threadId was unique and incrementing) spin up in ~2s. Each of those
+// nested preload runs sets its OWN `global.__clearStartupWatchdog` on
+// its OWN isolated worker global (worker_threads don't share a global
+// object with the main thread or each other), so the real
+// __clearStartupWatchdog call from main.ts — which only ever reaches the
+// main thread's own copy — can never cancel any of them. Every nested
+// kill-worker is an orphaned timer nobody can stop, independently armed
+// to SIGKILL the whole process (they all target the same pid) once ITS
+// OWN TIMEOUT_MS elapses, whether or not the app is healthy and serving
+// traffic by then. `execArgv: []` on the Worker below stops the
+// inheritance at the source for our own worker; this guard is the
+// belt-and-suspenders fix that also covers any OTHER worker thread the
+// app itself spawns (e.g. from a dependency's SDK) that doesn't think to
+// strip execArgv — any such worker would otherwise silently inherit
+// `--require` and kick off the exact same runaway chain.
+if (!isMainThread) {
+  return;
+}
+
+console.log(`[startup] ${Date.now()} preload loaded pid=${process.pid}`);
 
 const TIMEOUT_MS = Number(process.env.BACKEND_STARTUP_TIMEOUT_MS) || 45000;
 
@@ -56,28 +82,43 @@ const TIMEOUT_MS = Number(process.env.BACKEND_STARTUP_TIMEOUT_MS) || 45000;
 // fire in exactly the case (event loop frozen) where the report itself
 // could never have been produced anyway, and it can't miss the async-hang
 // case (event loop still turning) that's the one case this is worth
-// having. Deliberately NOT a second worker_thread: verified empirically
-// that a second worker racing the kill worker under a frozen main thread
-// gets its whole top-level script replayed from scratch, hundreds of
-// times over a real ~40s wait (an already-shared-memory idempotency guard
-// included — each replay got a clean slate, so guarding against re-firing
-// didn't work either) — a genuinely surprising Node behavior in this
-// specific "`--require`-spawned worker racing a frozen main thread"
-// scenario that we don't have a full root cause for. A single worker
-// (below) doesn't exhibit it, which is what the original PR #8 design
-// already relies on and what's kept unchanged here.
+// having. Originally tried as a second worker_thread instead of a plain
+// setTimeout; that produced what looked like the same worker's top-level
+// script replaying from scratch hundreds of times over a real ~40s wait,
+// defeating even a shared-memory idempotency guard. Root cause (see the
+// isMainThread guard above): it wasn't a replay of one worker at all — it
+// was a genuine, unbounded chain of distinct nested workers, each
+// inheriting `--require` via execArgv and re-running this file before its
+// actual task, each spawning the next. Fixed at the source now
+// (isMainThread guard + execArgv: []), so a second worker_thread would
+// presumably be safe today, but there's no reason to add one back: this
+// setTimeout costs nothing extra (see above) and keeps the kill-worker's
+// shape identical to the already-reviewed PR #8 design.
 const REPORT_LEAD_MS = 5000;
-const reportTimer = setTimeout(() => {
-  try {
-    process.kill(process.pid, 'SIGUSR2');
-    console.log(
-      `[startup-watchdog] ${TIMEOUT_MS - REPORT_LEAD_MS}ms without a successful listen() — sent SIGUSR2 for a diagnostic report`
-    );
-  } catch (e) {
-    console.log(`[startup-watchdog] SIGUSR2 send failed: ${e.message}`);
-  }
-}, Math.max(0, TIMEOUT_MS - REPORT_LEAD_MS));
-reportTimer.unref();
+// SIGUSR2's default disposition (no handler installed) is to terminate
+// the process — only safe to self-send here because --report-on-signal
+// --report-signal=SIGUSR2 installs a handler for it that turns the signal
+// into a report instead. Only schedule the send when that flag is
+// actually present in this process's own execArgv, so anywhere the
+// backend gets started without it (a future flag typo, some other
+// invocation path) this timer is simply inert rather than a delayed
+// self-kill of an otherwise-healthy process.
+const hasReportOnSignal = process.execArgv.includes('--report-on-signal');
+const reportTimer = hasReportOnSignal
+  ? setTimeout(() => {
+      try {
+        process.kill(process.pid, 'SIGUSR2');
+        console.log(
+          `[startup-watchdog] ${TIMEOUT_MS - REPORT_LEAD_MS}ms without a successful listen() — sent SIGUSR2 for a diagnostic report`
+        );
+      } catch (e) {
+        console.log(`[startup-watchdog] SIGUSR2 send failed: ${e.message}`);
+      }
+    }, Math.max(0, TIMEOUT_MS - REPORT_LEAD_MS))
+  : null;
+if (reportTimer) {
+  reportTimer.unref();
+}
 
 // Shared, not a regular ArrayBuffer: both threads see writes to this
 // memory immediately, which is what Atomics.wait/notify rely on.
@@ -117,7 +158,13 @@ const worker = new Worker(
     process.kill(workerData.pid, 'SIGKILL');
   }
   `,
-  { eval: true, workerData: { sharedBuffer, timeoutMs: TIMEOUT_MS, pid: process.pid } }
+  {
+    eval: true,
+    // See the isMainThread guard above — this is the primary fix for our
+    // own worker; the guard is what protects against anyone else's.
+    execArgv: [],
+    workerData: { sharedBuffer, timeoutMs: TIMEOUT_MS, pid: process.pid },
+  }
 );
 
 // Don't let this worker be a reason the process stays alive on its own —
@@ -132,10 +179,13 @@ global.__clearStartupWatchdog = () => {
   // Without this, a successfully-started backend would still get an
   // unsolicited SIGUSR2 ~REPORT_LEAD_MS before whatever TIMEOUT_MS was —
   // harmless with --report-on-signal active (just an unnecessary report on
-  // a healthy process), but SIGUSR2's default disposition is to terminate
-  // the process, so anywhere that flag isn't set (a local `pnpm run start`
-  // outside the container, say) this would silently kill an already-healthy
-  // backend. Verified: reproduced the kill, confirmed clearTimeout fixes it.
+  // a healthy process). Originally this was the only thing standing
+  // between a healthy backend and a delayed self-kill wherever
+  // --report-on-signal isn't set (SIGUSR2's default disposition is to
+  // terminate) — reproduced that kill directly before adding this. The
+  // hasReportOnSignal check above now means reportTimer is simply null in
+  // that case, so this is defense in depth, not the only thing stopping
+  // it. clearTimeout(null) is a documented no-op, safe either way.
   clearTimeout(reportTimer);
   console.log(`[startup-watchdog] cleared — backend is listening`);
 };
