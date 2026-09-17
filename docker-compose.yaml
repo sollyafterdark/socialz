@@ -77,7 +77,7 @@ services:
         export DATABASE_URL="$$(cat /run/secrets/database_url)"
         export REDIS_URL="redis://:$$(cat /run/secrets/redis_password)@redis:6379"
         export JWT_SECRET="$$(cat /run/secrets/jwt_secret)"
-        mkdir -p /config/node-reports
+        mkdir -p /config/node-reports && chmod 700 /config/node-reports
         exec sh -c 'nginx && pnpm run pm2'
     volumes:
       - /srv/socialz-state/config:/config

@@ -53,12 +53,31 @@ const { Worker, isMainThread } = require('worker_threads');
 // kill-worker is an orphaned timer nobody can stop, independently armed
 // to SIGKILL the whole process (they all target the same pid) once ITS
 // OWN TIMEOUT_MS elapses, whether or not the app is healthy and serving
-// traffic by then. `execArgv: []` on the Worker below stops the
-// inheritance at the source for our own worker; this guard is the
-// belt-and-suspenders fix that also covers any OTHER worker thread the
-// app itself spawns (e.g. from a dependency's SDK) that doesn't think to
-// strip execArgv — any such worker would otherwise silently inherit
-// `--require` and kick off the exact same runaway chain.
+// traffic by then. This guard being the very first thing this file does
+// is what stops the chain — a nested worker still inherits `--require`
+// and still re-runs this file, but immediately hits this check and
+// returns before doing anything else, including before it would create a
+// further nested worker. Confirmed this alone is sufficient (no need to
+// also strip execArgv on the Worker below): 15s run with this guard but
+// no execArgv override showed exactly one extra `isMainThread=false`
+// instrumentation hit, never a second one — the chain is cut to a single
+// harmless bounce, not zero, but zero further recursion either way. This
+// also covers any OTHER worker thread the app itself spawns (e.g. from a
+// dependency's SDK) that inherits `--require` — it would hit this same
+// guard immediately too.
+//
+// Deliberately NOT also passing `execArgv: []` to the Worker below, even
+// though that would strip the inheritance at the source and looks like
+// stronger defense in depth: verified empirically that explicitly setting
+// `execArgv` on a Worker — even to `[]` — silently defeats
+// --report-exclude-env for the ENTIRE process, not just that worker
+// (reproduced directly: a preload whose only job is `new Worker(x, {
+// execArgv: [] })` was enough to make secrets reappear in a report
+// generated afterward, with no exclude-env warning or error of any kind).
+// Since this app is started with --report-exclude-env specifically to
+// keep DATABASE_URL/JWT_SECRET/REDIS_URL out of any diagnostic report
+// written to a persistent host path, that trade is not worth it — the
+// isMainThread guard alone already fully stops the recursion.
 if (!isMainThread) {
   return;
 }
@@ -89,11 +108,12 @@ const TIMEOUT_MS = Number(process.env.BACKEND_STARTUP_TIMEOUT_MS) || 45000;
 // isMainThread guard above): it wasn't a replay of one worker at all — it
 // was a genuine, unbounded chain of distinct nested workers, each
 // inheriting `--require` via execArgv and re-running this file before its
-// actual task, each spawning the next. Fixed at the source now
-// (isMainThread guard + execArgv: []), so a second worker_thread would
-// presumably be safe today, but there's no reason to add one back: this
-// setTimeout costs nothing extra (see above) and keeps the kill-worker's
-// shape identical to the already-reviewed PR #8 design.
+// actual task, each spawning the next. Fixed at the source now (the
+// isMainThread guard above — see its comment for why execArgv: [] was
+// tried and dropped), so a second worker_thread would presumably be safe
+// today, but there's no reason to add one back: this setTimeout costs
+// nothing extra (see above) and keeps the kill-worker's shape identical
+// to the already-reviewed PR #8 design.
 const REPORT_LEAD_MS = 5000;
 // SIGUSR2's default disposition (no handler installed) is to terminate
 // the process — only safe to self-send here because --report-on-signal
@@ -160,9 +180,10 @@ const worker = new Worker(
   `,
   {
     eval: true,
-    // See the isMainThread guard above — this is the primary fix for our
-    // own worker; the guard is what protects against anyone else's.
-    execArgv: [],
+    // No execArgv override here — see the isMainThread guard's comment
+    // above for why (it defeats --report-exclude-env process-wide). The
+    // guard alone is what stops this worker's inherited --require from
+    // recursing.
     workerData: { sharedBuffer, timeoutMs: TIMEOUT_MS, pid: process.pid },
   }
 );
