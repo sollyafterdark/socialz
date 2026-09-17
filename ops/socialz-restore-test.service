@@ -1,0 +1,9 @@
+[Unit]
+Description=Socialz monthly backup restore test
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# See ops/README.md — the owner copies ops/*.sh here as part of setup.
+ExecStart=/opt/socialz-ops/restore-test.sh

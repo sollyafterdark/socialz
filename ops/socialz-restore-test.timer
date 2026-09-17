@@ -1,0 +1,11 @@
+[Unit]
+Description=Run socialz-restore-test.service monthly
+
+[Timer]
+# 1st of the month at 04:00 — an hour after the nightly 03:00 backup
+# (socialz-backup.timer), so a same-night backup always exists to test.
+OnCalendar=*-*-01 04:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

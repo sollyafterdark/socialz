@@ -1,0 +1,9 @@
+[Unit]
+Description=Socialz nightly Postgres backup
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# See ops/README.md — the owner copies ops/*.sh here as part of setup.
+ExecStart=/opt/socialz-ops/backup-postgres.sh
